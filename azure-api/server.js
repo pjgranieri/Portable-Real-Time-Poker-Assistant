@@ -1,31 +1,24 @@
 const express = require('express');
-const multer = require('multer');
-const { BlobServiceClient } = require('@azure/storage-blob');
-const { CosmosClient } = require('@azure/cosmos');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+const httpsPort = process.env.HTTPS_PORT || 3443;
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Azure Storage configuration
-const blobServiceClient = BlobServiceClient.fromConnectionString(
-  process.env.AZURE_STORAGE_CONNECTION_STRING
-);
-const containerName = 'esp32-images';
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
-// Azure Cosmos DB configuration (optional - for metadata)
-const cosmosClient = new CosmosClient({
-  endpoint: process.env.COSMOS_DB_ENDPOINT,
-  key: process.env.COSMOS_DB_KEY,
-});
-const database = cosmosClient.database('esp32-data');
-const container = database.container('image-metadata');
-
-// API Key validation middleware (optional)
+// API Key validation middleware
 const validateApiKey = (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
   const validApiKey = process.env.API_KEY;
@@ -46,7 +39,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Main image upload endpoint
+// Main image upload endpoint - simplified without Azure
 app.post('/api/upload-image', validateApiKey, async (req, res) => {
   try {
     console.log('📤 Received image upload request');
@@ -73,57 +66,21 @@ app.post('/api/upload-image', validateApiKey, async (req, res) => {
     
     // Generate unique filename
     const filename = `${device_id}_${timestamp || Date.now()}.${image_format || 'jpg'}`;
+    const filepath = path.join(uploadsDir, filename);
     
-    console.log(`📁 Uploading: ${filename} (${imageBuffer.length} bytes)`);
+    console.log(`📁 Saving: ${filename} (${imageBuffer.length} bytes)`);
 
-    // Upload to Azure Blob Storage
-    const blockBlobClient = blobServiceClient
-      .getContainerClient(containerName)
-      .getBlockBlobClient(filename);
-
-    const uploadOptions = {
-      metadata: {
-        deviceId: device_id,
-        timestamp: (timestamp || Date.now()).toString(),
-        originalSize: image_size?.toString(),
-        width: image_width?.toString(),
-        height: image_height?.toString(),
-      }
-    };
-
-    await blockBlobClient.upload(imageBuffer, imageBuffer.length, uploadOptions);
+    // Save to local filesystem
+    fs.writeFileSync(filepath, imageBuffer);
     
-    const blobUrl = blockBlobClient.url;
-    console.log(`✅ Uploaded to: ${blobUrl}`);
-
-    // Store metadata in Cosmos DB (optional)
-    const metadata = {
-      id: filename.replace('.', '_'), // Cosmos DB ID requirements
-      deviceId: device_id,
-      filename: filename,
-      timestamp: timestamp || Date.now(),
-      imageFormat: image_format || 'jpg',
-      imageWidth: image_width,
-      imageHeight: image_height,
-      imageSize: image_size,
-      blobUrl: blobUrl,
-      uploadedAt: new Date().toISOString()
-    };
-
-    try {
-      await container.items.create(metadata);
-      console.log('💾 Metadata saved to Cosmos DB');
-    } catch (cosmosError) {
-      console.warn('⚠️ Failed to save metadata to Cosmos DB:', cosmosError.message);
-      // Continue even if metadata save fails
-    }
+    console.log(`✅ Saved to: ${filepath}`);
 
     // Response
     res.status(200).json({
       success: true,
       message: 'Image uploaded successfully',
       filename: filename,
-      blobUrl: blobUrl,
+      filepath: filepath,
       metadata: {
         size: imageBuffer.length,
         dimensions: `${image_width}x${image_height}`,
@@ -144,33 +101,30 @@ app.post('/api/upload-image', validateApiKey, async (req, res) => {
 // Get recent images endpoint
 app.get('/api/images', validateApiKey, async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 10;
-    const deviceId = req.query.device_id;
-
-    let query = 'SELECT * FROM c ORDER BY c.timestamp DESC';
-    const parameters = [];
-
-    if (deviceId) {
-      query = 'SELECT * FROM c WHERE c.deviceId = @deviceId ORDER BY c.timestamp DESC';
-      parameters.push({ name: '@deviceId', value: deviceId });
-    }
-
-    const { resources: items } = await container.items
-      .query({ query, parameters })
-      .fetchNext();
+    const files = fs.readdirSync(uploadsDir)
+      .filter(file => file.match(/\.(jpg|jpeg|png)$/i))
+      .map(file => {
+        const stats = fs.statSync(path.join(uploadsDir, file));
+        return {
+          filename: file,
+          size: stats.size,
+          created: stats.birthtime
+        };
+      })
+      .sort((a, b) => b.created - a.created)
+      .slice(0, 10);
 
     res.json({
       success: true,
-      count: items.length,
-      images: items.slice(0, limit)
+      count: files.length,
+      images: files
     });
 
   } catch (error) {
     console.error('❌ Query error:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to retrieve images',
-      message: error.message
+      error: 'Failed to retrieve images'
     });
   }
 });
@@ -192,9 +146,26 @@ app.use((req, res) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`🚀 ESP32 Image Upload API running on port ${port}`);
-  console.log(`📡 Health check: http://localhost:${port}/api/health`);
-});
+// HTTPS configuration
+let httpsOptions;
+try {
+  httpsOptions = {
+    key: fs.readFileSync('./certs/key.pem'),
+    cert: fs.readFileSync('./certs/cert.pem')
+  };
+  console.log('📋 Using development SSL certificates');
+} catch (certError) {
+  console.log('⚠️  No SSL certificates found, running HTTP only');
+  httpsOptions = null;
+}
 
-module.exports = app;
+// Start servers
+if (httpsOptions) {
+  https.createServer(httpsOptions, app).listen(httpsPort, '0.0.0.0', () => {
+    console.log(`🔒 HTTPS ESP32 Image Upload API running on port ${httpsPort}`);
+  });
+}
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 HTTP ESP32 Image Upload API running on port ${port}`);
+});
