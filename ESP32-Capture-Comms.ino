@@ -6,12 +6,7 @@
 #include "esp_camera.h"
 
 // WiFi credentials (update with your actual WiFi)
-const char* ssid = "YOUR_WIFI_NAME";
-const char* password = "YOUR_WIFI_PASSWORD";
 
-// Your server details - HTTP (since HTTPS isn't configured yet)
-const char* serverURL = "http://20.246.97.176:3000/api/upload-image";
-const char* apiKey = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
 
 // === ESP32-S3-CAM pin map (from Image_Capture.ino) ===
 #define XCLK_GPIO     15
