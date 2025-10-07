@@ -1,16 +1,15 @@
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 #include <ArduinoJson.h>
 
 // WiFi credentials
-const char* ssid = "YOUR_WIFI_NAME";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "iphone (566)";
+const char* password = "hotdogpizza";
 
 // Server details
-const char* server = "20.246.97.176";
+const char* server = "20.246.97.176";  // Just the IP address
 const int port = 3000;
 const char* apiEndpoint = "/api/signal";
-const char* serverURL = "http://20.246.97.176:3000/api/signal";
 const char* apiKey = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
 
 void setup() {
@@ -42,7 +41,7 @@ void loop() {
   serializeJson(doc, jsonString);
 
   // Send HTTP POST request
-  client.println("POST " + String(serverURL) + " HTTP/1.1");
+  client.println("POST " + String(apiEndpoint) + " HTTP/1.1");
   client.println("Host: " + String(server));
   client.println("Content-Type: application/json");
   client.println("X-API-Key: " + String(apiKey)); // Add API key header
