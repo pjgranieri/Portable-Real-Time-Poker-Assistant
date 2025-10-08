@@ -2,11 +2,21 @@ const http = require('http');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
 const app = express();
 app.use(express.json({ limit: '50mb' })); // Increase payload limit for images
 
-const API_KEY = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
+const API_KEY = process.env.API_KEY;
+
+// Try to load sharp for image cropping
+let sharp;
+try {
+  sharp = require('sharp');
+  console.log('✅ Sharp loaded - image cropping enabled');
+} catch(e) {
+  console.log('⚠️  Sharp not installed - install with: npm install sharp');
+}
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, '../../Outputs');
@@ -30,11 +40,11 @@ app.post('/api/signal', validateApiKey, (req, res) => {
 });
 
 // Image upload endpoint
-app.post('/api/upload-image', validateApiKey, (req, res) => {
+app.post('/api/upload-image', validateApiKey, async (req, res) => {
   try {
     console.log('📸 Image upload request received');
     
-    const { device_id, timestamp, image_format, image_width, image_height, image_size, image_data } = req.body;
+    const { device_id, timestamp, image_format, image_width, image_height, image_size, image_data, roi } = req.body;
     
     // Validate required fields
     if (!image_data) {
@@ -44,23 +54,60 @@ app.post('/api/upload-image', validateApiKey, (req, res) => {
     // Decode base64 image
     const imageBuffer = Buffer.from(image_data, 'base64');
     
-    // Generate filename with timestamp
-    const filename = `${device_id || 'ESP32'}_${timestamp || Date.now()}.${image_format || 'jpg'}`;
+    let finalBuffer = imageBuffer;
+    let finalWidth = image_width;
+    let finalHeight = image_height;
+    let roiSection = '';
+    
+    // If ROI metadata exists and sharp is available, crop the image
+    if (roi && roi.x !== undefined && roi.width && roi.height && sharp) {
+      roiSection = `_${roi.section}`;
+      console.log(`🔲 Cropping ROI: ${roi.section} (x:${roi.x}, y:${roi.y}, ${roi.width}x${roi.height})`);
+      
+      try {
+        finalBuffer = await sharp(imageBuffer)
+          .extract({
+            left: roi.x,
+            top: roi.y,
+            width: roi.width,
+            height: roi.height
+          })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+        
+        finalWidth = roi.width;
+        finalHeight = roi.height;
+        
+        console.log(`✂️  Cropped: ${finalBuffer.length} bytes (${finalWidth}x${finalHeight})`);
+        console.log(`📉 Bandwidth saved: ${Math.round((1 - finalBuffer.length / imageBuffer.length) * 100)}%`);
+      } catch (cropError) {
+        console.error('❌ Cropping failed:', cropError.message);
+        // Fall back to full image
+      }
+    } else if (roi && !sharp) {
+      console.log('⚠️  ROI requested but Sharp not installed - saving full image');
+      roiSection = `_${roi.section}_FULL`;
+    }
+    
+    // Generate filename
+    const filename = `${device_id || 'ESP32'}${roiSection}_${timestamp || Date.now()}.${image_format || 'jpg'}`;
     const filepath = path.join(uploadsDir, filename);
     
     // Save image to disk
-    fs.writeFileSync(filepath, imageBuffer);
+    fs.writeFileSync(filepath, finalBuffer);
     
     console.log(`✅ Image saved: ${filename}`);
-    console.log(`   Size: ${image_size} bytes (${image_width}x${image_height})`);
+    console.log(`   Final size: ${finalBuffer.length} bytes (${finalWidth}x${finalHeight})`);
     console.log(`   Device: ${device_id}`);
-    console.log(`   Path: ${filepath}`);
+    console.log(`   Path: ${filepath}\n`);
     
     res.json({ 
       message: 'Image uploaded successfully!',
       filename: filename,
-      size: image_size,
-      dimensions: `${image_width}x${image_height}`
+      size: finalBuffer.length,
+      dimensions: `${finalWidth}x${finalHeight}`,
+      roi: roi || null,
+      cropped: roi && sharp ? true : false
     });
     
   } catch (error) {

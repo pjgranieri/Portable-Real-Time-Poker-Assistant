@@ -1,1 +1,7 @@
 .env
+secrets.h
+Outputs/
+CameraWebServerEx/
+node_modules/
+Communication/Server/node_modules/
+*.log
