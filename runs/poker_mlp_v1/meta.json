@@ -1,0 +1,39 @@
+{
+  "numeric_cols": [
+    "pot_bb",
+    "to_call_bb",
+    "hero_stack_bb",
+    "opp_stack_bb",
+    "effective_stack_bb",
+    "spr",
+    "raise_to_bb",
+    "bet_frac_of_pot",
+    "bet_frac_of_pot_clipped",
+    "is_allin"
+  ],
+  "street_vocab": [
+    "preflop",
+    "flop",
+    "turn",
+    "river"
+  ],
+  "pos_vocab": [
+    "SB",
+    "BB",
+    "UTG",
+    "MP",
+    "CO",
+    "BTN"
+  ],
+  "classes": [
+    "fold",
+    "check_call",
+    "raise_s",
+    "raise_m",
+    "raise_l"
+  ],
+  "raise_small_max_bb": 4.0,
+  "raise_medium_max_bb": 12.0,
+  "static_dim": 374,
+  "card_dim": 364
+}

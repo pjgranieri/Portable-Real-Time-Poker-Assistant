@@ -1,0 +1,11 @@
+              precision    recall  f1-score   support
+
+        fold      0.827     0.903     0.863     62734
+  check_call      0.988     0.977     0.983    528189
+     raise_s      0.998     0.999     0.998    103451
+     raise_m      0.992     0.995     0.994     52593
+     raise_l      0.997     0.987     0.992     30694
+
+    accuracy                          0.976    777661
+   macro avg      0.960     0.972     0.966    777661
+weighted avg      0.977     0.976     0.976    777661
