@@ -5,3 +5,50 @@ CameraWebServerEx/
 node_modules/
 Communication/Server/node_modules/
 *.log
+
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node modules
+node_modules/
+npm-debug.log
+
+# Outputs
+Image_Recognition/Outputs/*.jpg
+Image_Recognition/Outputs/*.png
+logs/
+*.log
+
+# Certificates
+certs/*.pem
+
+# Test files
+frame_*.jpg
