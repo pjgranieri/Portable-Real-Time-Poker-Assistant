@@ -2,14 +2,26 @@
   "numeric_cols": [
     "pot_bb",
     "to_call_bb",
-    "hero_stack_bb",
+    "stack_bb",
     "opp_stack_bb",
-    "effective_stack_bb",
-    "spr",
     "raise_to_bb",
     "bet_frac_of_pot",
-    "bet_frac_of_pot_clipped",
-    "is_allin"
+    "in_position",
+    "was_pfr",
+    "street_index",
+    "raises_this_street",
+    "board_texture_dry",
+    "board_texture_wet",
+    "pot_type_limped",
+    "pot_type_single_raised",
+    "pot_type_three_bet"
+  ],
+  "binary_cols": [
+    "board_texture_dry",
+    "board_texture_wet",
+    "pot_type_limped",
+    "pot_type_single_raised",
+    "pot_type_three_bet"
   ],
   "street_vocab": [
     "preflop",
@@ -18,22 +30,33 @@
     "river"
   ],
   "pos_vocab": [
-    "SB",
-    "BB",
-    "UTG",
-    "MP",
-    "CO",
-    "BTN"
+    "Early",
+    "Late",
+    "Blinds",
+    "Unknown"
   ],
   "classes": [
     "fold",
-    "check_call",
+    "check",
+    "call",
     "raise_s",
     "raise_m",
     "raise_l"
   ],
   "raise_small_max_bb": 4.0,
   "raise_medium_max_bb": 12.0,
-  "static_dim": 374,
-  "card_dim": 364
+  "static_dim": 372,
+  "card_dim": 364,
+  "numeric_dim": 15,
+  "n_scaled_cols": 10,
+  "temperature": 1.0126310586929321,
+  "policy": {
+    "fold_thresh": 0.0,
+    "fold_margin": 0.0,
+    "call_logit_bias": 0.0
+  },
+  "loss": {
+    "type": "crossentropy",
+    "label_smoothing": 0.0
+  }
 }
