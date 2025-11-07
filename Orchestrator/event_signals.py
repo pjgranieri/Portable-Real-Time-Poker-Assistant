@@ -28,10 +28,10 @@ def set_crop_mode(NoCrop=False, CropLeft=False, CropMiddle=False, CropRight=Fals
             }
         )
         response.raise_for_status()
-        print(f"✅ Crop mode set: {response.json()['mode']}")
+        print(f"Crop mode set: {response.json()['mode']}")
         return True
     except Exception as e:
-        print(f"❌ Failed to set crop mode: {e}")
+        print(f"Failed to set crop mode: {e}")
         return False
 
 def get_crop_mode():
@@ -44,7 +44,7 @@ def get_crop_mode():
         response.raise_for_status()
         return response.json()['mode']
     except Exception as e:
-        print(f"❌ Failed to get crop mode: {e}")
+        print(f"Failed to get crop mode: {e}")
         return None
 
 def wait_for_signal(signal_type, count=None):
@@ -79,5 +79,5 @@ def wait_for_signal(signal_type, count=None):
     
     elif signal_type == SignalType.ACTION:
         # Should not be called directly - use player_manager.get_action()
-        print("[SIGNAL] ⚠️  ACTION signal called directly - use player_manager.get_action()")
+        print("[SIGNAL] ACTION signal called directly - use player_manager.get_action()")
         return ("check", 0)

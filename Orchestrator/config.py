@@ -5,7 +5,7 @@ class Player(Enum):
     PlayerCoach = 0
     PlayerOne = 1
     PlayerTwo = 2
-    PlayerThree = 3
+    PlayerThree = 3 
 
 class GameState(Enum):
     WAIT_FOR_GAME_START = 0

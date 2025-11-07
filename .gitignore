@@ -50,5 +50,5 @@ logs/
 # Certificates
 certs/*.pem
 
-# Test files
+# Test filesfi
 frame_*.jpg
