@@ -36,8 +36,11 @@ POS_ALIASES = {
     "Early": "Early", "Late": "Late", "Blinds": "Blinds"
 }
 
-# Model paths
-MODEL_DIR = "./runs/poker_mlp_v1"
+# Model paths (adjust to match your directory structure)
+# Use absolute path to ensure correct navigation regardless of working directory
+THIS_FILE = os.path.abspath(__file__)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_FILE)))
+MODEL_DIR = os.path.join(REPO_ROOT, "runs", "poker_mlp_v1")
 MODEL_PATH = os.path.join(MODEL_DIR, "model.best.pt")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
@@ -50,20 +53,31 @@ CARD2IDX = {f"{r}{s}": i for i, (r, s) in enumerate((r, s) for r in RANKS for s 
 NUM_CARDS = 52
 
 def card_one_hot(card: str) -> np.ndarray:
+    """
+    Convert card string to one-hot encoding.
+    Handles formats: 'As', 'SA', 'HA', 'DK', etc.
+    First char = suit (C/D/H/S) or rank (2-9TJQKA)
+    Second char = rank or suit
+    """
     v = np.zeros(NUM_CARDS, dtype=np.float32)
-    if isinstance(card, str):
-        c = card.strip()
-        if len(c) == 2:
-            # Handle both 'SA' and 'As' formats
-            if c[0] in RANKS and c[1] in SUITS:
-                card_key = c
-            elif c[1] in RANKS and c[0] in SUITS:
-                card_key = c[1] + c[0].lower()
-            else:
-                card_key = None
-            
-            if card_key and card_key in CARD2IDX:
-                 v[CARD2IDX[card_key]] = 1.0
+    if not isinstance(card, str) or len(card) != 2:
+        return v
+    
+    c = card.strip().upper()
+    if not c or len(c) != 2:
+        return v
+    
+    # Try format 1: rank+suit (e.g., 'As', '2c')
+    if c[0] in RANKS and c[1].lower() in SUITS:
+        card_key = c[0] + c[1].lower()
+    # Try format 2: suit+rank (e.g., 'SA', 'C2', 'HA', 'DK')
+    elif c[0] in 'CDHS' and c[1] in RANKS:
+        card_key = c[1] + c[0].lower()
+    else:
+        return v
+    
+    if card_key in CARD2IDX:
+        v[CARD2IDX[card_key]] = 1.0
     return v
 
 def one_hot(value: str, vocab: List[str]) -> np.ndarray:
@@ -423,141 +437,267 @@ class LiveHandTracker:
         return action_name, prob_dict
 
 
-# Global tracker instance
+# Global tracker instance and BB normalizer
 _tracker = None
+_bb_normalizer = None  # Will be set from first hand (hand_id=1) to detect actual BB chip amount
 
 
 def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
     """
     Main entry point for CV system integration.
-    Call this function with CV JSON data to get poker action recommendation.
+    Call this function with orchestrator JSON data to get poker action recommendation.
     
-    CV JSON format:
+    Orchestrator JSON format (as per sample_orchestrator_outputs.json):
     {
-        "position": "BTN",              # Your seat (BTN, SB, BB, CO, etc.)
-        "big_blind": 1.0,               # Big blind size
-        "hole_cards": ["As", "Kh"],     # Your 2 cards
-        "board_cards": ["Qh", "Jc"],    # Community cards (0-5 cards)
-        "pot": 15.5,                    # Pot size in chips
-        "to_call": 5.0,                 # Amount to call
-        "your_stack": 100.0,            # Your stack
-        "opponent_stack": 85.0,         # Opponent's stack
-        "last_bet": 10.0,               # Last bet/raise size
-        "action_history": [...]         # Optional action sequence
+        "hand_id": 1,
+        "player_id": 1,
+        "round": "preflop",           # 'preflop', 'flop', 'turn', 'river'
+        "hole1": "HA",                # Hero's first card (suit+rank format: HA = Ace of Hearts)
+        "hole2": "DK",                # Hero's second card (DK = King of Diamonds)
+        "flop1": "C2",                # Flop card 1 (C2 = 2 of Clubs)
+        "flop2": "H7",                # Flop card 2
+        "flop3": "DT",                # Flop card 3
+        "turn": "DA",                 # Turn card (DA = Ace of Diamonds)
+        "river": "HK",                # River card
+        "stack_bb": 170,              # Hero's stack in big blinds
+        "opp_stack_bb": 165,          # Opponent's stack in big blinds
+        "to_call_bb": 5,              # Amount to call in big blinds
+        "pot_bb": 10,                 # Current pot size in big blinds
+        "action": "",                 # (not used for prediction - this is what we're predicting)
+        "final_pot_bb": ""            # (not used)
     }
     
     Returns:
     {
-        "action": "raise_m",            # Recommended action
-        "confidence": 0.85,             # Confidence (0-1)
-        "probabilities": {              # All action probabilities
-            "fold": 0.05,
-            "check": 0.10,
-            "call": 0.15,
-            "raise_s": 0.20,
-            "raise_m": 0.35,
-            "raise_l": 0.15
+        "action": "raise_m",          # Recommended action: fold/check/call/raise_s/raise_m/raise_l
+        "confidence": 0.85,           # Confidence (0-1)
+        "probabilities": {            # All action probabilities
+            "fold": "0.0500",
+            "check": "0.1000",
+            "call": "0.1500",
+            "raise_s": "0.2000",
+            "raise_m": "0.3500",
+            "raise_l": "0.1500"
+        },
+        "features": {                 # Debug info: extracted features
+            "pot_bb": 10.0,
+            "to_call_bb": 5.0,
+            "stack_bb": 170.0,
+            "bet_frac_of_pot": 0.5,
+            ...
         }
     }
     """
-    global _tracker
+    global _tracker, _bb_normalizer
     
-    # Initialize tracker on first call or if position/blinds changed
-    position = cv_json.get('position', 'BTN')
-    bb_size = cv_json.get('big_blind', 1.0)
+    # Determine position from player_id and hand structure
+    # For heads-up: player_id=1 is typically Button/SB, player_id=2 is BB
+    player_id = cv_json.get('player_id', 1)
+    position = 'BTN' if player_id == 1 else 'BB'
     
+    # Initialize tracker on first call
     if _tracker is None:
-        _tracker = LiveHandTracker(my_position=position, big_blind_size=bb_size)
+        _tracker = LiveHandTracker(my_position=position, big_blind_size=1.0)
     
-    # Convert CV JSON to tracker format
+    # Detect big blind on first hand (hand_id=1, preflop)
+    # The orchestrator sends raw chip amounts, but model expects normalized BB values
+    # Example: If starting stacks are 170 chips and BB=10 chips, then normalized stack should be 17.0 BB
+    if _bb_normalizer is None:
+        hand_id = cv_json.get('hand_id', 1)
+        if hand_id == 1 and cv_json.get('round', '').lower() == 'preflop':
+            # In heads-up, preflop pot should be SB + BB = 1.5 BB (typically 5 + 10 = 15 chips)
+            # So we can infer: BB_chips = preflop_pot / 1.5
+            preflop_pot = float(cv_json.get('pot_bb', 15.0))
+            _bb_normalizer = preflop_pot / 1.5  # Typical HU: pot=15 means BB=10
+            print(f"Detected BB size: {_bb_normalizer:.1f} chips (from hand_id=1 preflop pot={preflop_pot})")
+        else:
+            # If we don't have hand_id=1, assume BB=10 as default (can be overridden later)
+            _bb_normalizer = 10.0
+            print(f"Warning: Could not detect BB from hand_id=1, defaulting to {_bb_normalizer:.1f}")
+    
+    # Extract and convert CV orchestrator format to tracker format
+    street = cv_json.get('round', 'preflop').lower()
+    
+    # Build board cards list (filter out empty strings)
+    board_cards = []
+    for card_key in ['flop1', 'flop2', 'flop3', 'turn', 'river']:
+        card = cv_json.get(card_key, '').strip()
+        if card and card != '':
+            board_cards.append(card)
+    
+    # Build hole cards list
+    hole_cards = []
+    for card_key in ['hole1', 'hole2']:
+        card = cv_json.get(card_key, '').strip()
+        if card and card != '':
+            hole_cards.append(card)
+    
+    # Extract numeric values from orchestrator (in raw chip amounts)
+    # Then normalize by dividing by actual BB size
+    pot_chips = float(cv_json.get('pot_bb', 0.0))
+    to_call_chips = float(cv_json.get('to_call_bb', 0.0))
+    stack_chips = float(cv_json.get('stack_bb', 0.0))
+    opp_stack_chips = float(cv_json.get('opp_stack_bb', 0.0))
+    
+    # Normalize to BB (divide by actual BB chip amount)
+    pot_bb = pot_chips / _bb_normalizer
+    to_call_bb = to_call_chips / _bb_normalizer
+    stack_bb = stack_chips / _bb_normalizer
+    opp_stack_bb = opp_stack_chips / _bb_normalizer
+    
+    # Calculate last bet size (the amount opponent raised)
+    # If to_call > 0, the opponent bet to_call amount
+    # For sizing calculations, we need the raise size relative to previous pot
+    last_bet_bb = to_call_bb
+    
+    # Convert to tracker internal format
     tracker_data = {
-        'hole_cards': cv_json.get('hole_cards', []),
-        'board_cards': cv_json.get('board_cards', []),
-        'my_stack_chips': float(cv_json.get('your_stack', 0.0)),
-        'opp_stack_chips': float(cv_json.get('opponent_stack', 0.0)),
-        'pot_chips': float(cv_json.get('pot', 0.0)),
-        'to_call_chips': float(cv_json.get('to_call', 0.0)),
-        'last_bet_size_chips': float(cv_json.get('last_bet', 0.0)),
-        'action_sequence': cv_json.get('action_history', []),
-        'my_player_name': cv_json.get('player_name', 'hero')
+        'hole_cards': hole_cards,
+        'board_cards': board_cards,
+        'my_stack_chips': stack_bb,      # Already in BB, just store as "chips"
+        'opp_stack_chips': opp_stack_bb,
+        'pot_chips': pot_bb,
+        'to_call_chips': to_call_bb,
+        'last_bet_size_chips': last_bet_bb,
+        'action_sequence': [],            # Action history not provided by orchestrator
+        'my_player_name': 'hero'
     }
     
     # Update tracker with game state
+    _tracker.bb_size = 1.0  # Already in BB
+    _tracker.current_street = street
     _tracker.update_state_from_cv(tracker_data)
     
     # Get prediction
     action, prob_dict = _tracker.predict_action()
     
+    # Get feature vector for debugging
+    numeric_vec = _tracker.get_numeric_vector()
+    feature_names = _tracker.numeric_cols_order
+    features_debug = {name: float(numeric_vec[0, i]) for i, name in enumerate(feature_names)}
+    
     # Convert probabilities to floats
-    probs_float = {k: float(v) for k, v in prob_dict.items()}
+    probs_float = {k: float(v) if isinstance(v, (int, float)) else float(v) for k, v in prob_dict.items()}
     confidence = max(probs_float.values())
     
     return {
         'action': action,
         'confidence': confidence,
-        'probabilities': probs_float
+        'probabilities': prob_dict,  # Keep as strings for consistency
+        'features': features_debug    # For debugging/validation
     }
 
 
 def reset_hand():
     """Call this when starting a new hand"""
-    global _tracker
+    global _tracker, _bb_normalizer
     if _tracker:
         _tracker.reset_hand()
+    # Reset BB normalizer so it can be recalculated for new game
+    _bb_normalizer = None
 
 
 def new_session(position: str, big_blind: float):
     """Call this when position or blinds change"""
-    global _tracker
+    global _tracker, _bb_normalizer
     _tracker = LiveHandTracker(my_position=position, big_blind_size=big_blind)
+    # Reset BB normalizer for new session
+    _bb_normalizer = None
 
 
 if __name__ == "__main__":
-    # Example usage
-    print("=" * 60)
-    print("LiveHandTracker - Example Usage")
-    print("=" * 60)
+    # Example usage matching orchestrator format
+    print("=" * 80)
+    print("LiveHandTracker - Orchestrator Integration Test")
+    print("=" * 80)
     
-    # Example 1: Preflop with pocket aces
+    # Example 1: Preflop with AK (from sample_orchestrator_outputs.json)
     cv_data = {
-        "position": "BTN",
-        "big_blind": 1.0,
-        "hole_cards": ["As", "Ah"],
-        "board_cards": [],
-        "pot": 1.5,
-        "to_call": 1.0,
-        "your_stack": 100.0,
-        "opponent_stack": 100.0,
-        "last_bet": 1.0
+        "hand_id": 1,
+        "player_id": 1,
+        "round": "preflop",
+        "hole1": "HA",
+        "hole2": "DK",
+        "flop1": "",
+        "flop2": "",
+        "flop3": "",
+        "turn": "",
+        "river": "",
+        "stack_bb": 170,
+        "opp_stack_bb": 165,
+        "to_call_bb": 5,
+        "pot_bb": 10,
+        "action": "",
+        "final_pot_bb": ""
     }
     
-    print("\n[Example 1] Preflop with AA on BTN")
-    print("-" * 60)
+    print("\n[Example 1] Preflop: HA DK (A♥ K♦)")
+    print("-" * 80)
+    print(f"Input: {cv_data}")
     result = main(cv_data)
-    print(f"Recommended Action: {result['action']}")
+    print(f"\nRecommended Action: {result['action']}")
+    print(f"Confidence: {result['confidence']:.2%}")
+    print(f"Probabilities: {result['probabilities']}")
+    print(f"Extracted Features: {result['features']}")
+    
+    # Example 2: Flop with top pair (from sample)
+    reset_hand()
+    cv_data2 = {
+        "hand_id": 1,
+        "player_id": 1,
+        "round": "flop",
+        "hole1": "HA",
+        "hole2": "DK",
+        "flop1": "C2",
+        "flop2": "H7",
+        "flop3": "DT",
+        "turn": "",
+        "river": "",
+        "stack_bb": 165,
+        "opp_stack_bb": 155,
+        "to_call_bb": 10,
+        "pot_bb": 25,
+        "action": "",
+        "final_pot_bb": ""
+    }
+    
+    print("\n[Example 2] Flop: HA DK | C2 H7 DT (A♥ K♦ on 2♣ 7♥ T♦)")
+    print("-" * 80)
+    print(f"Input: {cv_data2}")
+    result = main(cv_data2)
+    print(f"\nRecommended Action: {result['action']}")
     print(f"Confidence: {result['confidence']:.2%}")
     print(f"Probabilities: {result['probabilities']}")
     
-    # Example 2: Flop with top pair
+    # Example 3: Turn with two pair
     reset_hand()
-    cv_data2 = {
-        "position": "BTN",
-        "big_blind": 1.0,
-        "hole_cards": ["As", "Kh"],
-        "board_cards": ["Ah", "Qc", "7d"],
-        "pot": 10.0,
-        "to_call": 5.0,
-        "your_stack": 95.0,
-        "opponent_stack": 95.0,
-        "last_bet": 5.0
+    cv_data3 = {
+        "hand_id": 1,
+        "player_id": 1,
+        "round": "turn",
+        "hole1": "HA",
+        "hole2": "DK",
+        "flop1": "C2",
+        "flop2": "H7",
+        "flop3": "DT",
+        "turn": "DA",
+        "river": "",
+        "stack_bb": 155,
+        "opp_stack_bb": 130,
+        "to_call_bb": 25,
+        "pot_bb": 60,
+        "action": "",
+        "final_pot_bb": ""
     }
     
-    print("\n[Example 2] Flop with top pair + top kicker")
-    print("-" * 60)
-    result = main(cv_data2)
-    print(f"Recommended Action: {result['action']}")
+    print("\n[Example 3] Turn: HA DK | C2 H7 DT DA (Two Pair: Aces and Kings)")
+    print("-" * 80)
+    result = main(cv_data3)
+    print(f"\nRecommended Action: {result['action']}")
     print(f"Confidence: {result['confidence']:.2%}")
     
-    print("\n" + "=" * 60)
-    print("Integration ready! Call main(cv_json) from your CV code.")
-    print("=" * 60)
+    print("\n" + "=" * 80)
+    print("✓ Integration ready! Call main(cv_json) from orchestrator.")
+    print("✓ Card format: [Suit][Rank] (HA=A♥, DK=K♦, C2=2♣, etc.)")
+    print("✓ All values already in BB - no conversion needed")
+    print("=" * 80)

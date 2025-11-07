@@ -13,7 +13,7 @@
     "stack_bb": 170,
     "opp_stack_bb": 165,
     "to_call_bb": 5,
-    "pot_bb": 10,
+    "pot_bb": 15,
     "action": "call",
     "final_pot_bb": ""
   },
@@ -28,8 +28,8 @@
     "flop3": "DT",
     "turn": "",
     "river": "",
-    "stack_bb": 165, // UPDATE IF ML RAISES EARLIER
-    "opp_stack_bb": 155, // UPDATE THIS IF ML MODEL RAISES TO MATCH CURR GAME STATE
+    "stack_bb": 165, 
+    "opp_stack_bb": 155, 
     "to_call_bb": 10,
     "pot_bb": 25,
     "action": "raise",
@@ -46,8 +46,8 @@
     "flop3": "DT",
     "turn": "DA",
     "river": "",
-    "stack_bb": 155, // UPDATE IF ML RAISED EARLIER
-    "opp_stack_bb": 130, // UPDATE IF ML RAISED EARLIER
+    "stack_bb": 155, 
+    "opp_stack_bb": 130, 
     "to_call_bb": 25,
     "pot_bb": 60,
     "action": "raise",
@@ -64,18 +64,18 @@
     "flop3": "DT",
     "turn": "DA",
     "river": "HK",
-    "stack_bb": 130, // UPDATE IF ML RAISED EARLIER
-    "opp_stack_bb": 100, // UPDATE IF ML RAISED EARLIER
+    "stack_bb": 130, 
+    "opp_stack_bb": 100, 
     "to_call_bb": 30,
     "pot_bb": 115,
     "action": "raise",
     "final_pot_bb": ""
   },
-  // DETERMINE WINNER HERE WITH OPP INPUT:
+ 
   {
     "hand_id": 1,
-    "player_id": 2, // OPPONENT
-    "round": "showdown", // OR RIVER?
+    "player_id": 2, 
+    "round": "showdown", 
     "hole1": "C9",
     "hole2": "HQ",
     "flop1": "C2",
@@ -83,11 +83,11 @@
     "flop3": "DT",
     "turn": "DA",
     "river": "HK",
-    "stack_bb": 100, // UPDATE IF ML RAISED EARLIER
-    "opp_stack_bb": 100, // UPDATE IF ML RAISED EARLIER
+    "stack_bb": 100, 
+    "opp_stack_bb": 100, 
     "to_call_bb": 0,
     "pot_bb": 145,
-    "action": "call", // UPDATE IF ML RAISED
+    "action": "call", 
     "final_pot_bb": 145
   }
 ]
