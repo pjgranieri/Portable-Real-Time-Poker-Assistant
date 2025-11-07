@@ -123,8 +123,12 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
             print("  3. Call ML: action, value = get_action(data)")
             print("  4. This is done in orchestrator.py around line 50\n")
         
-        # Ask for action
-        action, value = players.get_action(current_player, crop_region, amount_needed_to_call)
+        # Compute the current minimum legal total raise for informing callers
+        highest_has_called = max(has_called.values()) if has_called else 0
+        min_raise_total = highest_has_called + 1
+
+        # Ask for action (pass min_raise_total so InputInterface can validate)
+        action, value = players.get_action(current_player, crop_region, amount_needed_to_call, min_raise_total)
         
         # Update last action in ML generator (simplified) - NOW we track actions
         if ml_generator:

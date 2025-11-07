@@ -507,9 +507,18 @@ def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
         if hand_id == 1 and cv_json.get('round', '').lower() == 'preflop':
             # In heads-up, preflop pot should be SB + BB = 1.5 BB (typically 5 + 10 = 15 chips)
             # So we can infer: BB_chips = preflop_pot / 1.5
-            preflop_pot = float(cv_json.get('pot_bb', 15.0))
-            _bb_normalizer = preflop_pot / 1.5  # Typical HU: pot=15 means BB=10
-            print(f"Detected BB size: {_bb_normalizer:.1f} chips (from hand_id=1 preflop pot={preflop_pot})")
+            preflop_pot = float(cv_json.get('pot_bb', 0.0))
+            
+            # If pot is 0 (blinds not posted yet), use starting stacks to estimate
+            # Standard starting stack is ~17.5 BB, so BB = stack / 17.5
+            if preflop_pot > 0:
+                _bb_normalizer = preflop_pot / 1.5  # Typical HU: pot=15 means BB=10
+                print(f"Detected BB size: {_bb_normalizer:.1f} chips (from hand_id=1 preflop pot={preflop_pot})")
+            else:
+                # Estimate from stack size (assume 17.5 BB starting stack)
+                stack_chips = float(cv_json.get('stack_bb', 175.0))
+                _bb_normalizer = stack_chips / 17.5  # 175 chips / 17.5 BB = 10 chips per BB
+                print(f"Detected BB size: {_bb_normalizer:.1f} chips (estimated from starting stack={stack_chips})")
         else:
             # If we don't have hand_id=1, assume BB=10 as default (can be overridden later)
             _bb_normalizer = 10.0

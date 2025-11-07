@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test stub for poker game orchestrator
-Simulates CV and ML modules with manual terminal inputs
+Uses ML model for PlayerCoach and manual inputs for opponent
 Run with: python test_game.py
 """
 
@@ -12,8 +12,18 @@ from Orchestrator.betting_cycle import run_betting_cycle
 from Orchestrator.ml_json_input import MLJSONGenerator
 from Orchestrator.input_interface import InputInterface
 
+# Import ML module for coach actions
+try:
+    from Orchestrator.ml_module import get_action as ml_get_action, reset_game as ml_reset_game
+    ML_ENABLED = True
+    print("[OK] ML Model loaded successfully!")
+except Exception as e:
+    print(f"[WARNING] ML Model not available: {e}")
+    print("   Falling back to manual input for all players")
+    ML_ENABLED = False
+
 class TestGameOrchestrator:
-    """Test version of PokerGameOrchestrator with manual inputs"""
+    """Test version of PokerGameOrchestrator with ML for coach, manual for opponent"""
     
     def __init__(self):
         self.state = GameState.WAIT_FOR_GAME_START
@@ -29,13 +39,34 @@ class TestGameOrchestrator:
         self.players.evaluate_with_ml = self.mock_evaluate_with_ml
         self.players.read_showdown_hands = self.mock_read_showdown_hands
         
-    def mock_get_action(self, player_enum, crop_region, call_value):
-        """Manual input for player actions using InputInterface"""
+    def mock_get_action(self, player_enum, crop_region, call_value, min_raise_total=None):
+        """
+        Get player action:
+        - PlayerCoach: Use ML model (if enabled)
+        - Others: Manual input
+        """
+        # If this is the coach and ML is enabled, use ML model
+        if player_enum == Player.PlayerCoach and ML_ENABLED:
+            # Generate JSON for ML model
+            json_payload = self.ml_generator.generate_json_for_coach_action(
+                game_state=self.state,
+                cards=self.cards,
+                players=self.players,
+                community_pot=self.community_pot,
+                call_value=call_value
+            )
+            
+            # Get ML prediction
+            action, value = ml_get_action(json_payload)
+            return (action, value)
+        
+        # Otherwise use manual input
         player_data = self.players.get(player_enum)
         return self.input_interface.get_action(
             player_enum.name,
             call_value,
-            player_data["bankroll"]
+            player_data["bankroll"],
+            min_raise_total=min_raise_total
         )
     
     def mock_read_showdown_hands(self, remaining_players):
@@ -131,8 +162,10 @@ class TestGameOrchestrator:
         self.community_pot = 0
         self.call_value = 0
         
-        # Increment hand_id
+        # Increment hand_id and reset ML model
         self.ml_generator.increment_hand()
+        if ML_ENABLED:
+            ml_reset_game()
         
         print(f"\n Game initialized. All players start with $175. (Hand #{self.ml_generator.hand_id})")
         self.state = GameState.WAIT_FOR_HOLE_CARDS

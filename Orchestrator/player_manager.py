@@ -50,7 +50,7 @@ class PlayerManager:
         else:
             print(f"⚠️  No crop region for {player_enum.name}")
 
-    def get_action(self, player_enum, crop_region, call_value):
+    def get_action(self, player_enum, crop_region, call_value, min_raise_total=None):
         """Get action from CV module for a specific player"""
     
         # If this is the coach, generate ML JSON input
@@ -82,8 +82,9 @@ class PlayerManager:
         print(f"Waiting for {player_enum.name} action in {crop_region} region...")
         
         # Call CV action detector
+        # Note: min_raise_total is provided by the caller for validation/display
         action, value = detect_action(crop_mode=crop_region, timeout=30)
-        
+
         return action, value
 
     def get_active_players(self):

@@ -57,7 +57,7 @@ class InputInterface:
         return cards
     
     @staticmethod
-    def get_action(player_name, call_value, current_bankroll):
+    def get_action(player_name, call_value, current_bankroll, min_raise_total=None, max_retries=3):
         """
         Get player action from input with validation
         
@@ -79,8 +79,13 @@ class InputInterface:
             print(f"   Valid actions: check, raise, fold")
         else:
             print(f"   Valid actions: call (${call_value}), raise, fold")
+
+        # If caller provided a stricter minimum total raise, show it
+        if min_raise_total is not None:
+            print(f"   Minimum legal total raise: ${min_raise_total}")
         print(f"{'='*60}")
         
+        attempts = 0
         while True:
             action_input = input("Enter action: ").strip().lower()
             
@@ -103,21 +108,44 @@ class InputInterface:
                     print("  Nothing to call - use 'check' instead")
             
             elif action_input == "raise":
+                # If player doesn't have enough to even call, they cannot raise
                 if current_bankroll <= call_value:
                     print(f"  Not enough chips to raise (have ${current_bankroll})")
-                    continue
-                
-                try:
-                    amount = int(input(f"  Enter TOTAL raise amount (min ${call_value + 1}, max ${current_bankroll}): $").strip())
-                    
-                    if amount <= call_value:
-                        print(f"  Raise must be more than ${call_value}")
-                    elif amount > current_bankroll:
-                        print(f"  Cannot raise more than your bankroll (${current_bankroll})")
+                    # If they can still call, force call; otherwise force fold
+                    if call_value <= current_bankroll:
+                        print("  Falling back to CALL")
+                        return ("call", call_value)
                     else:
-                        return ("raise", amount)
+                        print("  Falling back to FOLD")
+                        return ("fold", 0)
+
+                # Determine the minimum total raise to enforce
+                effective_min = call_value + 1
+                if min_raise_total is not None:
+                    effective_min = max(effective_min, min_raise_total)
+
+                try:
+                    amount = int(input(f"  Enter TOTAL raise amount (min ${effective_min}, max ${current_bankroll}): $").strip())
                 except ValueError:
                     print("  Invalid amount, try again")
+                    attempts += 1
+                    if attempts >= max_retries:
+                        # Fallback: call if possible, else fold
+                        if call_value <= current_bankroll:
+                            print("  Too many invalid attempts - auto CALL")
+                            return ("call", call_value)
+                        else:
+                            print("  Too many invalid attempts - auto FOLD")
+                            return ("fold", 0)
+                    continue
+
+                # Validate amount
+                if amount < effective_min:
+                    print(f"  Raise must be at least ${effective_min} total")
+                elif amount > current_bankroll:
+                    print(f"  Cannot raise more than your bankroll (${current_bankroll})")
+                else:
+                    return ("raise", amount)
             
             else:
                 print("  Invalid action. Use: fold, check, call, or raise")

@@ -12,6 +12,16 @@ from Orchestrator.ml_json_input import MLJSONGenerator
 from Orchestrator.event_signals import wait_for_signal, SignalType, set_crop_mode
 import json
 
+# Import ML module for coach actions
+try:
+    from Orchestrator.ml_module import get_action as ml_get_action, reset_game as ml_reset_game
+    ML_ENABLED = True
+    print("[OK] ML Model loaded successfully in orchestrator!")
+except Exception as e:
+    print(f"[WARNING] ML Model not available: {e}")
+    print("   Falling back to manual input for coach")
+    ML_ENABLED = False
+
 class PokerGameOrchestrator:
     """Production game orchestrator with CV and ML integration"""
     
@@ -27,7 +37,7 @@ class PokerGameOrchestrator:
         self.original_get_action = self.players.get_action
         self.players.get_action = self.get_action_with_ml_integration
         
-    def get_action_with_ml_integration(self, player_enum, crop_region, call_value):
+    def get_action_with_ml_integration(self, player_enum, crop_region, call_value, min_raise_total=None):
         """Get action from CV (for opponents) or ML (for coach)"""
         
         if player_enum == Player.PlayerCoach:
@@ -48,33 +58,32 @@ class PokerGameOrchestrator:
             print(f"{'='*60}\n")
             
             # Send JSON to ML model and get decision
-            try:
-                # TODO: Replace this import with your actual ML module
-                # from ML_Model.predictor import get_poker_action
-                # data = json.loads(json_payload)
-                # action, value = get_poker_action(data)
-                # print(f"ML Decision: {action} {value if value > 0 else ''}")
-                # return action, value
-                
-                # PLACEHOLDER: Manual input until ML is connected
+            if ML_ENABLED:
+                try:
+                    action, value = ml_get_action(json_payload)
+                    print(f"ML Decision: {action} {value if value > 0 else ''}")
+                    return action, value
+                except Exception as e:
+                    print(f"ML model error: {e}")
+                    print("Falling back to manual input...")
+                    from Orchestrator.input_interface import InputInterface
+                    interface = InputInterface()
+                    return interface.get_action(
+                        player_enum.name,
+                        call_value,
+                        self.players.get(player_enum)["bankroll"],
+                        min_raise_total=min_raise_total
+                    )
+            else:
+                # ML not available - use manual input
                 print("ML model not connected - using manual input")
                 from Orchestrator.input_interface import InputInterface
                 interface = InputInterface()
                 return interface.get_action(
                     player_enum.name,
                     call_value,
-                    self.players.get(player_enum)["bankroll"]
-                )
-                
-            except Exception as e:
-                print(f"ML model error: {e}")
-                print("Falling back to manual input...")
-                from Orchestrator.input_interface import InputInterface
-                interface = InputInterface()
-                return interface.get_action(
-                    player_enum.name,
-                    call_value,
-                    self.players.get(player_enum)["bankroll"]
+                    self.players.get(player_enum)["bankroll"],
+                    min_raise_total=min_raise_total
                 )
         
         else:
@@ -97,7 +106,8 @@ class PokerGameOrchestrator:
                 return interface.get_action(
                     player_enum.name,
                     call_value,
-                    self.players.get(player_enum)["bankroll"]
+                    self.players.get(player_enum)["bankroll"],
+                    min_raise_total=min_raise_total
                 )
                 
             except Exception as e:
@@ -193,8 +203,10 @@ class PokerGameOrchestrator:
         self.community_pot = 0
         self.call_value = 0
         
-        # Increment hand_id
+        # Increment hand_id and reset ML model
         self.ml_generator.increment_hand()
+        if ML_ENABLED:
+            ml_reset_game()
         
         print(f"\nGame initialized. All players start with $175. (Hand #{self.ml_generator.hand_id})")
         self.state = GameState.WAIT_FOR_HOLE_CARDS
