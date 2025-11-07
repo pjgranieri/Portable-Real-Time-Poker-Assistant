@@ -5,18 +5,18 @@ from Orchestrator.event_signals import set_crop_mode
 class PlayerManager:
     def __init__(self):
         self.players = {
-            Player.PlayerCoach: {"bankroll": 100, "call": True, "folded": False},
-            Player.PlayerOne: {"bankroll": 100, "call": True, "folded": False},
-            Player.PlayerTwo: {"bankroll": 100, "call": True, "folded": False},
-            Player.PlayerThree: {"bankroll": 100, "call": True, "folded": False}
+            Player.PlayerCoach: {"bankroll": 175, "call": True, "folded": False},
+            Player.PlayerOne: {"bankroll": 175, "call": True, "folded": False},
+            Player.PlayerTwo: {"bankroll": 175, "call": True, "folded": False},
+            Player.PlayerThree: {"bankroll": 175, "call": True, "folded": False}
         }
-        self.small_blind = Player.PlayerOne
-        self.big_blind = Player.PlayerTwo
+        self.small_blind = Player.PlayerCoach
+        self.big_blind = Player.PlayerOne
 
     def initialize_bankrolls(self):
         """Reset all player states for new game"""
         for p in self.players:
-            self.players[p]["bankroll"] = 100
+            self.players[p]["bankroll"] = 175
             self.players[p]["folded"] = False
             self.players[p]["call"] = True
 
@@ -52,12 +52,34 @@ class PlayerManager:
 
     def get_action(self, player_enum, crop_region, call_value):
         """Get action from CV module for a specific player"""
+    
+        # If this is the coach, generate ML JSON input
+        if player_enum == Player.PlayerCoach:
+            from Orchestrator.ml_json_input import MLJSONGenerator
+            ml_gen = MLJSONGenerator()  # Should be stored in GameController
+            
+            # Generate JSON with current game state
+            json_payload = ml_gen.generate_json_for_coach_action(
+                game_state=...,  # Pass from game_controller
+                cards=...,  # Pass CardManager instance
+                players=self,
+                community_pot=...,  # Pass from game_controller
+                call_value=call_value
+            )
+            
+            # Send to ML model or print for debugging
+            print("[ML INPUT]")
+            ml_gen.print_json(json_payload)
+            
+            # TODO: Send json_payload to ML model API/module
+            # ml_action, ml_value = send_to_ml_model(json_payload)
+        
         from Image_Recognition.action_detector import detect_action
         
         # Set the crop region on the server
         self.set_crop_for_player(player_enum)
         
-        print(f"⏳ Waiting for {player_enum.name} action in {crop_region} region...")
+        print(f"Waiting for {player_enum.name} action in {crop_region} region...")
         
         # Call CV action detector
         action, value = detect_action(crop_mode=crop_region, timeout=30)

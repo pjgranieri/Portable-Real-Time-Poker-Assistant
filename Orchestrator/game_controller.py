@@ -4,6 +4,7 @@ from Orchestrator.player_manager import PlayerManager
 from Orchestrator.card_manager import CardManager
 from Orchestrator.event_signals import wait_for_signal, SignalType, set_crop_mode
 from Orchestrator.config import GameState, Player
+from Orchestrator.ml_json_input import MLJSONGenerator
 
 class PokerGameOrchestrator:
     def __init__(self):
@@ -12,6 +13,7 @@ class PokerGameOrchestrator:
         self.cards = CardManager()
         self.community_pot = 0
         self.call_value = 0
+        self.ml_generator = MLJSONGenerator()  # Initialize ML JSON generator
 
     def run(self):
         while True:
@@ -50,6 +52,9 @@ class PokerGameOrchestrator:
                 bankroll = self.players.get(player)["bankroll"]
                 print(f"  {player.name}: {bankroll} chips")
             
+            # Increment hand counter for next game
+            self.ml_generator.increment_hand()
+            
             return True
         return False
 
@@ -67,7 +72,7 @@ class PokerGameOrchestrator:
         # Set server to NoCrop mode
         set_crop_mode(NoCrop=True)
         
-        print("[STATE] Game initialized. All players start with 100 chips.")
+        print(f"[STATE] Game initialized. All players start with 100 chips. Hand #{self.ml_generator.hand_id + 1}")
         self.state = GameState.WAIT_FOR_HOLE_CARDS
 
     def wait_for_hole_cards(self):
@@ -81,13 +86,17 @@ class PokerGameOrchestrator:
         self.cards.set_hole_cards(Player.PlayerCoach, hole_cards)
         print(f"[STATE] Hole cards received: {hole_cards}")
         
+        # Increment hand_id when new game starts (cards are dealt)
+        self.ml_generator.increment_hand()
+        
         self.state = GameState.PRE_FLOP_BETTING
 
     def pre_flop_betting(self):
         """Pre-flop betting cycle starting at small blind"""
         print("[STATE] Pre-flop betting...")
         self.community_pot, self.call_value = run_betting_cycle(
-            self.players, self.community_pot, self.call_value
+            self.players, self.community_pot, self.call_value,
+            game_state=self.state, cards=self.cards, ml_generator=self.ml_generator
         )
         
         # Check if only one player remains
@@ -113,7 +122,8 @@ class PokerGameOrchestrator:
         """Post-flop betting cycle"""
         print("[STATE] Post-flop betting...")
         self.community_pot, self.call_value = run_betting_cycle(
-            self.players, self.community_pot, self.call_value
+            self.players, self.community_pot, self.call_value,
+            game_state=self.state, cards=self.cards, ml_generator=self.ml_generator
         )
         
         # Check if only one player remains
@@ -139,7 +149,8 @@ class PokerGameOrchestrator:
         """Turn betting cycle"""
         print("[STATE] Turn betting...")
         self.community_pot, self.call_value = run_betting_cycle(
-            self.players, self.community_pot, self.call_value
+            self.players, self.community_pot, self.call_value,
+            game_state=self.state, cards=self.cards, ml_generator=self.ml_generator
         )
         
         # Check if only one player remains
@@ -165,7 +176,8 @@ class PokerGameOrchestrator:
         """River betting cycle (final betting round)"""
         print("[STATE] River betting...")
         self.community_pot, self.call_value = run_betting_cycle(
-            self.players, self.community_pot, self.call_value
+            self.players, self.community_pot, self.call_value,
+            game_state=self.state, cards=self.cards, ml_generator=self.ml_generator
         )
         
         # After river betting, check if only one player remains
@@ -208,5 +220,8 @@ class PokerGameOrchestrator:
         for player in Player:
             bankroll = self.players.get(player)["bankroll"]
             print(f"  {player.name}: {bankroll} chips")
+        
+        # Increment hand counter for next game
+        self.ml_generator.increment_hand()
         
         self.state = GameState.WAIT_FOR_GAME_START

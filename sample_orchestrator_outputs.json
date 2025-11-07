@@ -1,7 +1,7 @@
 [
   {
-    "hand_id": "1",
-    "player_id": "1",
+    "hand_id": 1,
+    "player_id": 1,
     "round": "preflop",
     "hole1": "HA",
     "hole2": "DK",
@@ -18,8 +18,8 @@
     "final_pot_bb": ""
   },
   {
-    "hand_id": "1",
-    "player_id": "1",
+    "hand_id": 1,
+    "player_id": 1,
     "round": "flop",
     "hole1": "HA",
     "hole2": "DK",
@@ -35,28 +35,10 @@
     "action": "raise",
     "final_pot_bb": ""
   },
-  {
-    "hand_id": "1",
-    "player_id": "1",
-    "round": "flop",
-    "hole1": "HA",
-    "hole2": "DK",
-    "flop1": "C2",
-    "flop2": "H7",
-    "flop3": "DT",
-    "turn": "",
-    "river": "",
-    "stack_bb": 155, // UPDATE IF ML RAISED EARLIER
-    "opp_stack_bb": 155, // UPDATE IF ML RAISED EARLIER
-    "to_call_bb": 0,
-    "pot_bb": 35,
-    "action": "check",
-    "final_pot_bb": ""
-  }, 
 {
-    "hand_id": "1",
-    "player_id": "1",
-    "round": "flop",
+    "hand_id": 1,
+    "player_id": 1,
+    "round": "turn",
     "hole1": "HA",
     "hole2": "DK",
     "flop1": "C2",
@@ -67,14 +49,14 @@
     "stack_bb": 155, // UPDATE IF ML RAISED EARLIER
     "opp_stack_bb": 130, // UPDATE IF ML RAISED EARLIER
     "to_call_bb": 25,
-    "pot_bb": 65,
+    "pot_bb": 60,
     "action": "raise",
     "final_pot_bb": ""
   },
 {
-    "hand_id": "1",
-    "player_id": "1",
-    "round": "flop",
+    "hand_id": 1,
+    "player_id": 1,
+    "round": "river",
     "hole1": "HA",
     "hole2": "DK",
     "flop1": "C2",
@@ -88,13 +70,12 @@
     "pot_bb": 115,
     "action": "raise",
     "final_pot_bb": ""
-  }
-
+  },
   // DETERMINE WINNER HERE WITH OPP INPUT:
   {
-    "hand_id": "1",
-    "player_id": "2", // OPPONENT
-    "round": "flop",
+    "hand_id": 1,
+    "player_id": 2, // OPPONENT
+    "round": "showdown", // OR RIVER?
     "hole1": "C9",
     "hole2": "HQ",
     "flop1": "C2",
@@ -109,6 +90,4 @@
     "action": "call", // UPDATE IF ML RAISED
     "final_pot_bb": 145
   }
-
-
 ]
