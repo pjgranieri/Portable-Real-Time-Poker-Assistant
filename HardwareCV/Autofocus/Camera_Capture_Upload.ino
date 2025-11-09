@@ -70,7 +70,7 @@ void initXCLK() {
     .clk_cfg          = LEDC_AUTO_CLK
   };
   ledc_timer_config(&ledc_timer);
-  
+
   ledc_channel_config_t ledc_channel = {
     .gpio_num       = XCLK_GPIO_NUM,
     .speed_mode     = LEDC_LOW_SPEED_MODE,
@@ -89,13 +89,6 @@ void initXCLK() {
 // Camera configuration for OV5640
 // =============================
 void initCamera() {
-  // Wake up the camera first
-  pinMode(PWDN_GPIO_NUM, OUTPUT);
-  pinMode(RESET_GPIO_NUM, OUTPUT);
-  digitalWrite(PWDN_GPIO_NUM, LOW);   // Power ON (active HIGH to power down)
-  digitalWrite(RESET_GPIO_NUM, HIGH); // Release reset (active LOW)
-  delay(50);
-  
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
@@ -135,45 +128,35 @@ void initCamera() {
 
   Serial.println("✅ Camera initialized successfully!");
 
-  // Get sensor and apply OV5640-specific settings
+  // Get sensor and apply settings
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
     Serial.printf("📷 Detected sensor PID: 0x%04X\n", s->id.PID);
     
-    // OV5640-specific sensor settings
-    s->set_brightness(s, 0);      // -2 to 2
-    s->set_contrast(s, 0);        // -2 to 2
-    s->set_saturation(s, 0);      // -2 to 2
-    s->set_whitebal(s, 1);        // Enable auto white balance
-    s->set_awb_gain(s, 1);        // Enable auto white balance gain
-    s->set_exposure_ctrl(s, 1);   // Enable auto exposure
-    s->set_aec2(s, 1);            // Enable AEC sensor
-    s->set_gain_ctrl(s, 1);       // Enable auto gain
-    s->set_agc_gain(s, 0);        // Auto gain value (0-30)
-    s->set_bpc(s, 1);             // Enable black pixel correction
-    s->set_wpc(s, 1);             // Enable white pixel correction
-    s->set_lenc(s, 1);            // Enable lens correction
-    s->set_dcw(s, 1);             // Enable downsize cropping window
-    s->set_colorbar(s, 0);        // Disable color bar test pattern
+    // Apply same basic settings as ESP32-Cropped
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_lenc(s, 1);
     
-    // OV5640 supports autofocus - trigger it
-    if (s->id.PID == 0x5640) {  // OV5640 PID
+    if (s->id.PID == 0x5640) {
       Serial.println("🎯 OV5640 detected - autofocus available");
-      // Note: Autofocus can be triggered per capture or continuously
-      // For continuous AF, you might need additional register writes
     }
   }
   
-  // Warm up camera
+  // Match ESP32-Cropped warmup (single capture)
   Serial.println("🔥 Warming up camera...");
-  for (int i = 0; i < 3; i++) {  // Take a few frames to stabilize
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (fb) {
-      esp_camera_fb_return(fb);
-    }
-    delay(100);
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (fb) {
+    esp_camera_fb_return(fb);
+    Serial.println("✅ Camera warmup successful!");
+  } else {
+    Serial.println("⚠️ Camera warmup failed, but continuing...");
   }
-  Serial.println("✅ Camera warmup successful!");
 }
 
 // =============================
@@ -211,19 +194,13 @@ bool captureAndUploadROI(int roiIndex) {
   int roiWidths[] = {LEFT_WIDTH, MIDDLE_WIDTH, RIGHT_WIDTH};
   int roiStartX[] = {0, LEFT_WIDTH, LEFT_WIDTH + MIDDLE_WIDTH};
   
-  Serial.printf("\n📸 Capturing %s ROI (Attempt #%d)...\n", roiNames[roiIndex], captureCount);
-  Serial.printf("📊 Statistics: %d captures, %d failures\n", captureCount - 1, failureCount);
-  Serial.printf("🔲 ROI: x=%d, width=%d, height=%d\n", roiStartX[roiIndex], roiWidths[roiIndex], IMAGE_HEIGHT);
+  Serial.printf("\n📸 Capturing %s ROI (#%d)...\n", roiNames[roiIndex], captureCount);
   
-  // Check WiFi connection
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ WiFi disconnected, reconnecting...");
-    if (!connectWiFi()) {
-      return false;
-    }
+    Serial.println("❌ WiFi disconnected");
+    if (!connectWiFi()) return false;
   }
 
-  // Check available memory
   size_t freeHeap = ESP.getFreeHeap();
   Serial.printf("📊 Free heap: %u bytes\n", freeHeap);
   
@@ -232,45 +209,18 @@ bool captureAndUploadROI(int roiIndex) {
     return false;
   }
 
-  // Capture full image
-  Serial.println("📷 Requesting full frame from camera...");
-  unsigned long captureStart = millis();
+  // Single capture attempt (like ESP32-Cropped)
   camera_fb_t* fb = esp_camera_fb_get();
-  unsigned long captureTime = millis() - captureStart;
   
   if (!fb) {
-    Serial.printf("❌ Camera capture failed (took %lu ms)\n", captureTime);
-    Serial.println("🔄 Retrying camera capture...");
-    delay(100);
-    
-    captureStart = millis();
-    fb = esp_camera_fb_get();  // Retry once
-    captureTime = millis() - captureStart;
-    
-    if (!fb) {
-      Serial.printf("❌ Camera capture retry failed (took %lu ms)\n", captureTime);
-      Serial.println("⚠️ Camera may be stuck. Consider power cycling the device.");
-      failureCount++;
-      return false;
-    }
-  }
-  
-  Serial.printf("✅ Captured full image: %d bytes, %dx%d (took %lu ms)\n", fb->len, fb->width, fb->height, captureTime);
-  
-  // Validate frame buffer
-  if (fb->len == 0 || fb->buf == NULL) {
-    Serial.println("❌ Invalid frame buffer (empty or null)");
-    esp_camera_fb_return(fb);
+    Serial.println("❌ Camera capture failed");
     failureCount++;
     return false;
   }
-
-  // For JPEG images, we'll send metadata about the ROI with the full image
-  // The server can handle the cropping, or we send the full image with ROI metadata
-  Serial.printf("🔄 Preparing %s ROI for upload...\n", roiNames[roiIndex]);
   
-  // Encode full image to base64
-  Serial.println("🔄 Encoding full image to base64...");
+  Serial.printf("✅ Captured: %d bytes, %dx%d\n", fb->len, fb->width, fb->height);
+  
+  // Encode to base64
   String imageBase64 = base64::encode(fb->buf, fb->len);
   
   if (imageBase64.length() == 0) {
@@ -280,13 +230,10 @@ bool captureAndUploadROI(int roiIndex) {
     return false;
   }
 
-  Serial.printf("✅ Base64 encoded: %d bytes\n", imageBase64.length());
-
-  // Create JSON payload with ROI information
-  Serial.println("🔄 Creating JSON payload with ROI metadata...");
+  // Create JSON with ROI metadata
   DynamicJsonDocument doc(imageBase64.length() + 2048);
   
-  doc["device_id"] = "ESP32S3_OV5640_001";
+  doc["device_id"] = "ESP32S3_OV5640";
   doc["timestamp"] = millis();
   doc["image_format"] = "jpg";
   doc["image_width"] = fb->width;
@@ -294,26 +241,19 @@ bool captureAndUploadROI(int roiIndex) {
   doc["image_size"] = fb->len;
   doc["image_data"] = imageBase64;
   
-  // Add ROI metadata
   JsonObject roi = doc.createNestedObject("roi");
   roi["section"] = roiNames[roiIndex];
   roi["x"] = roiStartX[roiIndex];
   roi["y"] = 0;
   roi["width"] = roiWidths[roiIndex];
   roi["height"] = IMAGE_HEIGHT;
-  roi["index"] = roiIndex;
 
   String jsonString;
   serializeJson(doc, jsonString);
   
-  Serial.printf("📦 JSON payload size: %d bytes\n", jsonString.length());
-
-  // Free camera buffer
   esp_camera_fb_return(fb);
 
-  // Send HTTP POST request
-  Serial.println("🌐 Sending HTTP request...");
-  
+  // HTTP POST
   HTTPClient http;
   http.begin(serverURL);
   http.setTimeout(HTTP_TIMEOUT);
@@ -324,21 +264,14 @@ bool captureAndUploadROI(int roiIndex) {
   
   bool success = false;
   if (httpResponseCode > 0) {
-    String response = http.getString();
-    Serial.printf("✅ Upload successful! Response code: %d\n", httpResponseCode);
-    Serial.println("📄 Response: " + response);
+    Serial.printf("✅ Upload OK: %d\n", httpResponseCode);
     success = true;
   } else {
-    Serial.printf("❌ Upload failed! Error code: %d\n", httpResponseCode);
-    String error = http.errorToString(httpResponseCode);
-    Serial.println("🔍 Error: " + error);
+    Serial.printf("❌ Upload failed: %d\n", httpResponseCode);
     failureCount++;
   }
 
   http.end();
-  
-  Serial.printf("📊 Free heap after upload: %u bytes\n", ESP.getFreeHeap());
-  
   return success;
 }
 
