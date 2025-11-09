@@ -1,8 +1,25 @@
 from ultralytics import YOLO
 import cv2
-import mediapipe as mp
 import os
 import numpy as np
+
+# Try to import MediaPipe, handle different versions
+try:
+    import mediapipe as mp
+    if hasattr(mp, 'solutions'):
+        mp_hands = mp.solutions.hands
+        mp_drawing = mp.solutions.drawing_utils
+        MEDIAPIPE_AVAILABLE = True
+    else:
+        # Newer MediaPipe API
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
+        MEDIAPIPE_AVAILABLE = True
+        MEDIAPIPE_NEW_API = True
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+    MEDIAPIPE_NEW_API = False
+    print("[WARNING] MediaPipe not available. Hand detection will be disabled.")
 
 class ActionAnalyzer:
     def __init__(self):
@@ -16,17 +33,28 @@ class ActionAnalyzer:
         self.chip_model = YOLO(chip_model_path)
         self.chip_amount_model = YOLO(chip_amount_model_path)
         
-        # Initialize MediaPipe Hand Detection
-        self.mp_hands = mp.solutions.hands
-        self.hands = self.mp_hands.Hands(
-            static_image_mode=True,
-            max_num_hands=2,
-            min_detection_confidence=0.5
-        )
+        # Initialize MediaPipe Hand Detection if available
+        self.hands = None
+        if MEDIAPIPE_AVAILABLE:
+            try:
+                if not MEDIAPIPE_NEW_API:
+                    # Old API
+                    self.hands = mp_hands.Hands(
+                        static_image_mode=True,
+                        max_num_hands=2,
+                        min_detection_confidence=0.5
+                    )
+                else:
+                    # For newer API, we'll skip hand detection for now
+                    print("[WARNING] MediaPipe new API detected. Hand detection simplified.")
+                    self.hands = None
+            except Exception as e:
+                print(f"[WARNING] Could not initialize MediaPipe hands: {e}")
+                self.hands = None
     
     def check_chips(self, image_path):
         """Check if chips are present in the image"""
-        results = self.chip_model(image_path)
+        results = self.chip_model(image_path, verbose=False)
         
         detected_chips = []
         for result in results:
@@ -39,7 +67,7 @@ class ActionAnalyzer:
     
     def check_chip_amounts(self, image_path):
         """Check chip amounts in the image"""
-        results = self.chip_amount_model(image_path)
+        results = self.chip_amount_model(image_path, verbose=False)
         
         detected_amounts = set()
         for result in results:
@@ -91,21 +119,61 @@ class ActionAnalyzer:
         return False
     
     def check_hand_present(self, image_path):
-        """Check if a hand is present using MediaPipe"""
-        # Load image
+        """Check if a hand is present using MediaPipe or simple skin detection"""
+        if not MEDIAPIPE_AVAILABLE or self.hands is None:
+            # Fallback: Use simple skin color detection
+            return self.check_hand_simple(image_path)
+        
+        try:
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                return False
+            
+            # Convert BGR to RGB
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            # Process image with MediaPipe
+            results = self.hands.process(image_rgb)
+            
+            # Check if hands are detected
+            if results.multi_hand_landmarks:
+                return True
+            
+            return False
+        except Exception as e:
+            print(f"[WARNING] MediaPipe hand detection failed: {e}")
+            return self.check_hand_simple(image_path)
+    
+    def check_hand_simple(self, image_path):
+        """Simple hand detection using skin color detection"""
         image = cv2.imread(image_path)
         if image is None:
             return False
         
-        # Convert BGR to RGB
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Convert to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Process image with MediaPipe
-        results = self.hands.process(image_rgb)
+        # Define skin color range in HSV
+        lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+        upper_skin = np.array([20, 255, 255], dtype=np.uint8)
         
-        # Check if hands are detected
-        if results.multi_hand_landmarks:
-            return True
+        # Create mask for skin color
+        skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+        
+        # Apply morphological operations to clean up
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours
+        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Check if any significant skin-colored region exists
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 1000:  # Threshold for hand size
+                return True
         
         return False
     
@@ -156,7 +224,11 @@ class ActionAnalyzer:
     
     def __del__(self):
         """Cleanup MediaPipe resources"""
-        self.hands.close()
+        if hasattr(self, 'hands') and self.hands is not None:
+            try:
+                self.hands.close()
+            except:
+                pass
 
 
 # Example usage
@@ -166,7 +238,10 @@ if __name__ == "__main__":
     # Test with an image
     test_image = os.path.join(os.path.dirname(__file__), 'Outputs', 'test_env_three.jpg')
     
-    result = analyzer.analyze_action(test_image)
-    
-    print(f"Action detected: {result['action']}")
-    print(f"Details: {result['details']}")
+    if os.path.exists(test_image):
+        result = analyzer.analyze_action(test_image)
+        
+        print(f"Action detected: {result['action']}")
+        print(f"Details: {result['details']}")
+    else:
+        print(f"Test image not found: {test_image}")
