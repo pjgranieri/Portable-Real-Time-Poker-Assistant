@@ -482,7 +482,6 @@ class LiveHandTracker:
 
         # Apply fold-gating (only when legal)
         if "fold" in allowed_actions and p_fold >= Cfg.fold_thresh and margin >= Cfg.fold_margin:
-            # Preflop: defend override vs small bet when call is viable
             try:
                 idx_street = self.numeric_cols_order.index('street_index')
                 idx_to_call = self.numeric_cols_order.index('to_call_bb')
@@ -491,14 +490,48 @@ class LiveHandTracker:
                 to_call_val = float(numeric_vec_unscaled[0, idx_to_call])
                 pot_val = float(numeric_vec_unscaled[0, idx_pot])
                 p_call = probs[CLASSES.index('call')].item()
+                p_rs = probs[CLASSES.index('raise_s')].item()
                 is_small_preflop_defend = (street_idx == 0 and to_call_val > 0 and to_call_val <= 0.6 and pot_val <= 1.5)
-                if is_small_preflop_defend and p_call >= 0.40 and p_fold < 0.60:
+                # hand strength simple score
+                def rank_val(c):
+                    r = c[1].upper() if len(c) >=2 else ''
+                    return {'A':14,'K':13,'Q':12,'J':11,'T':10,'9':9,'8':8,'7':7,'6':6,'5':5,'4':4,'3':3,'2':2}.get(r,0)
+                if len(self.hole_cards) >=2:
+                    r1 = rank_val(self.hole_cards[0]); r2 = rank_val(self.hole_cards[1])
+                    suited = (len(self.hole_cards[0])>=2 and len(self.hole_cards[1])>=2 and self.hole_cards[0][0]==self.hole_cards[1][0])
+                    connected = abs(r1-r2)==1
+                    strength = max(r1,r2) + 0.5*min(r1,r2) + (1.5 if suited else 0) + (0.5 if connected else 0)
+                else:
+                    strength = 0
+                combo = p_call + p_rs
+                # expanded defend rule
+                if is_small_preflop_defend and strength >= 15 and (p_fold - combo) <= 0.28 and combo >= 0.18:
+                    if p_call >= p_rs:
+                        action_name = 'call'
+                    else:
+                        action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['preflop_defend_override'] += 1
+                # top-rank defend
+                elif is_small_preflop_defend and max(r1, r2) >= 13 and (p_fold - combo) <= 0.42 and (p_call >= 0.25 or combo >= 0.28):
+                    if p_call >= p_rs:
+                        action_name = 'call'
+                    else:
+                        action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['preflop_defend_override'] += 1
+                # NEW: if (call + raise_s) within 0.20 of fold and combined >= 0.25 choose better of them
+                elif is_small_preflop_defend and (p_fold - combo) <= 0.20 and combo >= 0.25:
+                    if p_call >= p_rs:
+                        action_name = 'call'
+                    else:
+                        action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['preflop_defend_override'] += 1
+                elif is_small_preflop_defend and p_call >= 0.40 and p_fold < 0.60:
                     action_name = 'call'
                     self.action_stats['heuristic_triggers']['preflop_defend_override'] += 1
                 else:
-                    action_name = "fold"
+                    action_name = 'fold'
             except Exception:
-                action_name = "fold"
+                action_name = 'fold'
         else:
             # Choose best among allowed actions
             best_name = None

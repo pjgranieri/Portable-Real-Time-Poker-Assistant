@@ -171,52 +171,43 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
                 print(f"  Nothing to call - use 'check' instead")
                 continue  # Ask again
             
-        elif action == 'raise':
-            # Get how much player has already paid this round
-            amount_already_paid = amount_paid_this_round[current_player]
-            
-            # Calculate how much MORE they need to pay to reach their raise amount
-            additional_payment = value - amount_already_paid
-            
-            # Minimum raise total = current call value + $5 (half big blind)
-            # If no current bet (call_value == 0), min raise is $5
-            if call_value == 0:
-                min_raise_total = 5
+        elif action == "raise":
+            requested_total = value
+            highest_has_called = max(has_called.values())
+            min_raise_total = highest_has_called + 1
+            if requested_total < min_raise_total:
+                total_raise = min_raise_total
             else:
-                min_raise_total = call_value + 5
-            
-            # Check if their TOTAL bet (value) meets the minimum raise requirement
-            if value + amount_already_paid < min_raise_total:
-                print(f"  Raise to ${value} is too small (minimum ${min_raise_total})")
-                print(f"      Current call: ${call_value}")
-                print(f"      Already paid this round: ${amount_already_paid}")
+                total_raise = requested_total
+            amount_to_pay = total_raise - amount_already_paid
+            if amount_to_pay > player_data["bankroll"]:
+                total_raise = amount_already_paid + player_data["bankroll"]
+                amount_to_pay = player_data["bankroll"]
+            if total_raise <= highest_has_called and amount_to_pay <= 0:
+                to_call = highest_has_called - amount_already_paid
+                if to_call > 0 and player_data["bankroll"] >= to_call:
+                    player_data["bankroll"] -= to_call
+                    community_pot += to_call
+                    amount_paid_this_round[current_player] += to_call
+                    has_called[current_player] = amount_paid_this_round[current_player]
+                    players_acted[current_player] = True
+                    print(f"  {current_player.name} calls ${to_call}")
+                else:
+                    players_acted[current_player] = True
+                    print(f"  {current_player.name} checks")
+                cycle_position += 1
                 continue
-            
-            # Check if they have enough money for the additional payment
-            if additional_payment > player_data["bankroll"]:
-                print(f"  Cannot raise - need ${additional_payment} more but only have ${player_data['bankroll']}")
-                continue
-            
-            # Valid raise - deduct only the ADDITIONAL chips
-            player_data["bankroll"] -= additional_payment
-            amount_paid_this_round[current_player] = value
-            has_called[current_player] = value
-            community_pot += additional_payment
-            call_value = value
+            player_data["bankroll"] -= amount_to_pay
+            community_pot += amount_to_pay
+            amount_paid_this_round[current_player] = total_raise
+            has_called[current_player] = total_raise
+            call_value = total_raise
             last_raiser = current_player
-            
-            print(f"  {current_player.name} raises to ${value} (paid ${additional_payment} more)")
-            
-            # Reset action flags - everyone must act again
-            for p in [Player.PlayerCoach, Player.PlayerOne]:
-                if p != current_player:
-                    players_acted[p] = False
-            
             players_acted[current_player] = True
+            print(f"  {current_player.name} raises to ${total_raise} (pays ${amount_to_pay})")
+            for p in Player:
+                if p != current_player and not players.get(p)["folded"]:
+                    players_acted[p] = False
             cycle_position += 1
-        
-        else:
-            print(f"  Invalid action: {action}")
-            continue
     
     return community_pot, call_value

@@ -28,19 +28,17 @@ def get_action(json_payload):
     # Parse JSON
     data = json.loads(json_payload)
     
-    # Normalize payload for model expectations (BTN semantics & preflop blinds)
-    # The model expects: player_id=1 => BTN/SB; preflop first-to-act has no bet to face
+    # align BTN & preflop handling
     if data.get('player_id', 0) == 0:
         data['player_id'] = 1
     round_name = (data.get('round') or '').lower()
     is_first_to_act = not bool(data.get('action'))
-    # If preflop and first to act, present a no-bet state with standard HU blinds in pot
     if round_name == 'preflop' and is_first_to_act:
-        # If pot not initialized, assume SB+BB = 1.5 * BB with BB≈10 based on $175 stacks
         if float(data.get('pot_bb', 0) or 0) <= 0:
             data['pot_bb'] = 15.0
-        # No bet to face for open action
-        data['to_call_bb'] = 0.0
+        # Only zero to_call if truly opening (no completion needed)
+        if float(data.get('to_call_bb', 0) or 0) <= 1e-6:
+            data['to_call_bb'] = 0.0
 
     # Get ML prediction
     result = get_ml_prediction(data)
@@ -71,41 +69,32 @@ def get_action(json_payload):
         return ("call", 0)
     
     elif ml_action.startswith("raise_"):
-        # Compute raise as a chip amount (orchestrator expects chip dollars)
-        # The incoming JSON fields use chip amounts (misnamed *_bb in orchestrator),
-        # so interpret them directly as chips when producing a total bet amount.
-        pot_chips = float(data.get('pot_bb', 0))
-        to_call_chips = float(data.get('to_call_bb', 0))
-        stack_chips = float(data.get('stack_bb', 0))
+        pot_chips = float(data.get('pot_bb', 0) or 0)
+        to_call_chips = float(data.get('to_call_bb', 0) or 0)
+        stack_chips = float(data.get('stack_bb', 0) or 0)
+        opp_stack = float(data.get('opp_stack_bb', 0) or 0)
 
-        # Choose multiplier based on model's coarse sizing
+        multiplier = 1.0
         if ml_action == "raise_s":
             multiplier = 0.5
         elif ml_action == "raise_m":
             multiplier = 1.0
         elif ml_action == "raise_l":
             multiplier = 2.0
-        else:
-            multiplier = 1.0
 
-        # If pot is available, scale additional raise from pot size, else use fraction of stack
-        if pot_chips > 0:
-            additional = max(1.0, int(pot_chips * multiplier))
-        else:
-            additional = max(1.0, int(stack_chips * 0.2))
+        additional = int(max(1.0, (pot_chips * multiplier) if pot_chips > 0 else (stack_chips * 0.2)))
+        requested_total = int(to_call_chips + additional)
 
-        # Total amount this player will put in this round = amount to call + additional
-        total_bet = int(to_call_chips + additional)
+        # avoid raise loop
+        min_total = int(to_call_chips + 1)
+        if requested_total < min_total:
+            requested_total = min_total
 
-        # Ensure at least one-chip increase beyond call (minimum legal raise)
-        if total_bet <= to_call_chips:
-            total_bet = int(to_call_chips + 1)
+        # all-in cap
+        hard_cap = int(max(1.0, min(stack_chips, max(1.0, opp_stack)))) if stack_chips > 0 else requested_total
+        requested_total = int(min(requested_total, hard_cap))
 
-        # Cap at player's stack
-        if stack_chips > 0:
-            total_bet = min(total_bet, int(stack_chips))
-
-        return ("raise", int(total_bet))
+        return ("raise", int(requested_total))
     
     else:
         # Unknown action - default to check/call
