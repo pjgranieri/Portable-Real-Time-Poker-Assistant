@@ -6,16 +6,15 @@ import numpy as np
 # Try to import MediaPipe, handle different versions
 try:
     import mediapipe as mp
-    if hasattr(mp, 'solutions'):
-        mp_hands = mp.solutions.hands
-        mp_drawing = mp.solutions.drawing_utils
-        MEDIAPIPE_AVAILABLE = True
-    else:
-        # Newer MediaPipe API
-        from mediapipe.tasks import python
-        from mediapipe.tasks.python import vision
-        MEDIAPIPE_AVAILABLE = True
-        MEDIAPIPE_NEW_API = True
+    MEDIAPIPE_AVAILABLE = True
+    
+    # Check MediaPipe version to determine API
+    try:
+        # MediaPipe 0.10+ uses new API
+        MEDIAPIPE_NEW_API = hasattr(mp.solutions.hands, 'Hands')
+    except:
+        MEDIAPIPE_NEW_API = False
+        
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
     MEDIAPIPE_NEW_API = False
@@ -53,17 +52,101 @@ class ActionAnalyzer:
                 self.hands = None
     
     def check_chips(self, image_path):
-        """Check if chips are present in the image"""
-        results = self.chip_model(image_path, verbose=False)
+        """Check for chips - with enhanced filtering for false positives"""
+        if self.chip_model is None:
+            print("[MOCK] No chip model - simulating 2 chips detected")
+            return True, ['Chip', 'Chip']
         
-        detected_chips = []
-        for result in results:
-            for box in result.boxes:
-                class_id = int(box.cls[0])
-                chip_label = result.names[class_id]
-                detected_chips.append(chip_label)
-        
-        return len(detected_chips) > 0, detected_chips
+        try:
+            results = self.chip_model(image_path, conf=self.confidence_threshold, verbose=False)
+            
+            chip_labels = []
+            chip_boxes = []
+            
+            for result in results:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    class_name = result.names[class_id]
+                    confidence = float(box.conf[0])
+                    bbox = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
+                    
+                    # FILTER 1: Only accept "Chip" class
+                    if 'chip' not in class_name.lower():
+                        continue
+                    
+                    # FILTER 2: Check aspect ratio (chips should be roughly circular/square)
+                    width = bbox[2] - bbox[0]
+                    height = bbox[3] - bbox[1]
+                    aspect_ratio = width / height if height > 0 else 0
+                    
+                    # Chips should have aspect ratio between 0.7 and 1.4 (roughly square/circular)
+                    if aspect_ratio < 0.7 or aspect_ratio > 1.4:
+                        print(f"[FILTER] Ignoring detection - bad aspect ratio: {aspect_ratio:.2f}")
+                        continue
+                    
+                    # FILTER 3: Size check - chips shouldn't be too large or too small
+                    area = width * height
+                    image = cv2.imread(image_path)
+                    if image is not None:
+                        img_area = image.shape[0] * image.shape[1]
+                        relative_area = area / img_area
+                        
+                        # Chip should be between 0.5% and 15% of image area
+                        if relative_area < 0.005 or relative_area > 0.15:
+                            print(f"[FILTER] Ignoring detection - bad size: {relative_area*100:.2f}% of image")
+                            continue
+                    
+                    # FILTER 4: Color check - chips should have consistent colors (not skin-like)
+                    if not self._verify_chip_color(image_path, bbox):
+                        print(f"[FILTER] Ignoring detection - skin-like color detected")
+                        continue
+                    
+                    chip_labels.append(class_name)
+                    chip_boxes.append(bbox)
+            
+            print(f"[CHIP DETECTION] Found {len(chip_labels)} valid chips after filtering")
+            return len(chip_labels) > 0, chip_labels
+            
+        except Exception as e:
+            print(f"[ERROR] Chip detection failed: {e}")
+            return False, []
+    
+    def _verify_chip_color(self, image_path, bbox):
+        """Verify the detected region has chip-like colors, not skin tones"""
+        try:
+            image = cv2.imread(image_path)
+            if image is None:
+                return True  # Can't verify, assume valid
+            
+            # Extract the region
+            x1, y1, x2, y2 = map(int, bbox)
+            region = image[y1:y2, x1:x2]
+            
+            if region.size == 0:
+                return True
+            
+            # Convert to HSV for better color analysis
+            hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+            
+            # Define skin tone range in HSV
+            # Skin tones typically: H=0-25, S=30-170, V=80-255
+            lower_skin = np.array([0, 30, 80], dtype=np.uint8)
+            upper_skin = np.array([25, 170, 255], dtype=np.uint8)
+            
+            # Check how much of the region is skin-colored
+            skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            skin_percentage = np.count_nonzero(skin_mask) / skin_mask.size
+            
+            # If more than 60% is skin-colored, it's probably not a chip
+            if skin_percentage > 0.6:
+                print(f"[COLOR CHECK] {skin_percentage*100:.1f}% skin-tone pixels detected")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"[WARNING] Color verification failed: {e}")
+            return True  # If verification fails, assume valid
     
     def check_chip_amounts(self, image_path):
         """Check chip amounts in the image"""
