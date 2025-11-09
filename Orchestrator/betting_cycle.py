@@ -172,46 +172,42 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
                 continue  # Ask again
             
         elif action == "raise":
-            # total_raise is the TOTAL amount this player is putting in THIS ROUND
-            total_raise = value
-            amount_to_pay = total_raise - amount_already_paid
-            
-            # FIXED: Minimum raise calculation
-            # Find the current highest bet anyone has made
+            requested_total = value
             highest_has_called = max(has_called.values())
-            
-            # The minimum raise total must be at least $1 MORE than the current highest
             min_raise_total = highest_has_called + 1
-            
-            # Check if their total raise meets the minimum
-            if total_raise < min_raise_total:
-                to_call = highest_has_called - has_called[current_player]
-                min_additional = min_raise_total - has_called[current_player]
-                print(f"  Raise must be at least ${min_raise_total} total")
-                if to_call > 0:
-                    print(f"      (You've paid ${has_called[current_player]}, need ${min_additional} more to raise minimum)")
-                else:
-                    print(f"      (You've paid ${has_called[current_player]}, need ${min_additional} more to raise minimum)")
-                continue  # Ask again
-            
+            if requested_total < min_raise_total:
+                total_raise = min_raise_total
+            else:
+                total_raise = requested_total
+            amount_to_pay = total_raise - amount_already_paid
             if amount_to_pay > player_data["bankroll"]:
-                print(f"  Not enough chips (have ${player_data['bankroll']}, need ${amount_to_pay})")
-                continue  # Ask again
-            
+                total_raise = amount_already_paid + player_data["bankroll"]
+                amount_to_pay = player_data["bankroll"]
+            if total_raise <= highest_has_called and amount_to_pay <= 0:
+                to_call = highest_has_called - amount_already_paid
+                if to_call > 0 and player_data["bankroll"] >= to_call:
+                    player_data["bankroll"] -= to_call
+                    community_pot += to_call
+                    amount_paid_this_round[current_player] += to_call
+                    has_called[current_player] = amount_paid_this_round[current_player]
+                    players_acted[current_player] = True
+                    print(f"  {current_player.name} calls ${to_call}")
+                else:
+                    players_acted[current_player] = True
+                    print(f"  {current_player.name} checks")
+                cycle_position += 1
+                continue
             player_data["bankroll"] -= amount_to_pay
             community_pot += amount_to_pay
             amount_paid_this_round[current_player] = total_raise
             has_called[current_player] = total_raise
-            call_value = total_raise  # Update call_value to this new raise amount
+            call_value = total_raise
             last_raiser = current_player
             players_acted[current_player] = True
             print(f"  {current_player.name} raises to ${total_raise} (pays ${amount_to_pay})")
-            
-            # Reset all other players' acted status (they need to respond to raise)
             for p in Player:
                 if p != current_player and not players.get(p)["folded"]:
                     players_acted[p] = False
-            
             cycle_position += 1
     
     return community_pot, call_value
