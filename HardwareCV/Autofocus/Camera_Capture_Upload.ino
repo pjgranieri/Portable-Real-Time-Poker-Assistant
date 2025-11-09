@@ -33,28 +33,17 @@ const char* apiKey = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
 #define HREF_GPIO_NUM   13
 #define PCLK_GPIO_NUM   14
 
-#define LED_GPIO_NUM    -1  // No LED on this module
+#define LED_GPIO_NUM    -1
 
 // Timing and memory constants
-#define WIFI_TIMEOUT 20000     // 20 seconds
-#define HTTP_TIMEOUT 30000     // 30 seconds
-#define CAPTURE_INTERVAL 10000 // 10 seconds between full capture cycles
-#define MIN_FREE_HEAP 50000    // Minimum heap before upload
+#define WIFI_TIMEOUT 20000
+#define HTTP_TIMEOUT 30000
+#define CAPTURE_INTERVAL 10000
+#define MIN_FREE_HEAP 50000
 
-// ROI (Region of Interest) definitions for 640x480 image
-// Left section: 0-212 (213 pixels wide)
-// Middle section: 213-426 (214 pixels wide)
-// Right section: 427-639 (213 pixels wide)
-#define IMAGE_WIDTH 640
-#define IMAGE_HEIGHT 480
-#define LEFT_WIDTH 213
-#define MIDDLE_WIDTH 214
-#define RIGHT_WIDTH 213
-
-// Counter for debugging
+// Counters
 int captureCount = 0;
 int failureCount = 0;
-int currentROI = 0; // 0 = left, 1 = middle, 2 = right
 
 // =============================
 // Initialize 24 MHz XCLK for OV5640
@@ -62,32 +51,43 @@ int currentROI = 0; // 0 = left, 1 = middle, 2 = right
 void initXCLK() {
   Serial.println("🔧 Configuring 24 MHz XCLK for OV5640...");
   
-  ledc_timer_config_t ledc_timer = {
-    .speed_mode       = LEDC_LOW_SPEED_MODE,
-    .duty_resolution  = LEDC_TIMER_1_BIT,
-    .timer_num        = LEDC_TIMER_0,
-    .freq_hz          = 24000000,
-    .clk_cfg          = LEDC_AUTO_CLK
+  ledc_timer_config_t timer_cfg = {
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .duty_resolution = LEDC_TIMER_1_BIT,
+    .timer_num = LEDC_TIMER_0,
+    .freq_hz = 24000000,
+    .clk_cfg = LEDC_AUTO_CLK
   };
-  ledc_timer_config(&ledc_timer);
+  ledc_timer_config(&timer_cfg);
 
-  ledc_channel_config_t ledc_channel = {
-    .gpio_num       = XCLK_GPIO_NUM,
-    .speed_mode     = LEDC_LOW_SPEED_MODE,
-    .channel        = LEDC_CHANNEL_0,
-    .intr_type      = LEDC_INTR_DISABLE,
-    .timer_sel      = LEDC_TIMER_0,
-    .duty           = 1,
-    .hpoint         = 0
+  ledc_channel_config_t ch_cfg = {
+    .gpio_num = XCLK_GPIO_NUM,
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .channel = LEDC_CHANNEL_0,
+    .intr_type = LEDC_INTR_DISABLE,
+    .timer_sel = LEDC_TIMER_0,
+    .duty = 1,
+    .hpoint = 0
   };
-  ledc_channel_config(&ledc_channel);
+  ledc_channel_config(&ch_cfg);
   
   Serial.println("✅ 24 MHz clock started on GPIO15");
 }
 
 // =============================
-// Camera configuration for OV5640
+// Camera initialization
 // =============================
+void initCamera() {
+  camera_config_t cam_cfg;
+  cam_cfg.ledc_channel = LEDC_CHANNEL_0;
+  cam_cfg.ledc_timer = LEDC_TIMER_0;
+  cam_cfg.pin_d0 = Y2_GPIO_NUM;
+  cam_cfg.pin_d1 = Y3_GPIO_NUM;
+  cam_cfg.pin_d2 = Y4_GPIO_NUM;
+  cam_cfg.pin_d3 = Y5_GPIO_NUM;
+  cam_cfg.pin_d4 = Y6_GPIO_NUM;
+  cam_cfg.pin_d5 = Y7_GPIO_NUM;
+  cam_cfg.pin_d6 = Y8_GPIO_NUM;
 void initCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
