@@ -6,6 +6,7 @@ import json
 import sys
 import os
 
+
 # Add ML Model directory to path
 ml_model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ML Model Work", "Model")
 sys.path.insert(0, ml_model_path)
@@ -27,6 +28,20 @@ def get_action(json_payload):
     # Parse JSON
     data = json.loads(json_payload)
     
+    # Normalize payload for model expectations (BTN semantics & preflop blinds)
+    # The model expects: player_id=1 => BTN/SB; preflop first-to-act has no bet to face
+    if data.get('player_id', 0) == 0:
+        data['player_id'] = 1
+    round_name = (data.get('round') or '').lower()
+    is_first_to_act = not bool(data.get('action'))
+    # If preflop and first to act, present a no-bet state with standard HU blinds in pot
+    if round_name == 'preflop' and is_first_to_act:
+        # If pot not initialized, assume SB+BB = 1.5 * BB with BB≈10 based on $175 stacks
+        if float(data.get('pot_bb', 0) or 0) <= 0:
+            data['pot_bb'] = 15.0
+        # No bet to face for open action
+        data['to_call_bb'] = 0.0
+
     # Get ML prediction
     result = get_ml_prediction(data)
     
