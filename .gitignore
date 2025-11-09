@@ -51,4 +51,23 @@ logs/
 certs/*.pem
 
 # Test filesfi
-frame_*.jpg
+frame_*.jpg# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Backup files
+*.backup
+*.bak
+*.tmp
+
+# Virtual environment
+.venv/
+venv/
