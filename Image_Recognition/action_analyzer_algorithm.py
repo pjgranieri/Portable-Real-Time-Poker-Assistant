@@ -21,7 +21,8 @@ except ImportError:
     print("[WARNING] MediaPipe not available. Hand detection will be disabled.")
 
 class ActionAnalyzer:
-    def __init__(self):
+    def __init__(self, confidence_threshold=0.75):
+        self.confidence_threshold = confidence_threshold
         # Get the directory where this script is located
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         
@@ -91,8 +92,8 @@ class ActionAnalyzer:
                         img_area = image.shape[0] * image.shape[1]
                         relative_area = area / img_area
                         
-                        # Chip should be between 0.5% and 15% of image area
-                        if relative_area < 0.005 or relative_area > 0.15:
+                        # ADJUSTED: Chip can be 0.5% to 70% of image area
+                        if relative_area < 0.005 or relative_area > 0.70:
                             print(f"[FILTER] Ignoring detection - bad size: {relative_area*100:.2f}% of image")
                             continue
                     
