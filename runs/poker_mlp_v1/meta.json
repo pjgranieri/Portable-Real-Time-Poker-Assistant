@@ -49,7 +49,7 @@
   "card_dim": 364,
   "numeric_dim": 15,
   "n_scaled_cols": 10,
-  "temperature": 1.0126310586929321,
+  "temperature": 1.0203090906143188,
   "policy": {
     "fold_thresh": 0.0,
     "fold_margin": 0.0,

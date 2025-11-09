@@ -30,7 +30,7 @@ class Cfg:
     max_epochs   = 100   
     val_split    = 0.15  
     num_workers  = 8     
-    patience     = 15
+    patience     = 4
 
     streets   = ["preflop", "flop", "turn", "river"]
     positions = ["Early", "Late", "Blinds", "Unknown"]

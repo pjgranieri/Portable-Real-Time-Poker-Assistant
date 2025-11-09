@@ -36,8 +36,7 @@ POS_ALIASES = {
     "Early": "Early", "Late": "Late", "Blinds": "Blinds"
 }
 
-# Model paths (adjust to match your directory structure)
-# Use absolute path to ensure correct navigation regardless of working directory
+# Model paths 
 THIS_FILE = os.path.abspath(__file__)
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_FILE)))
 MODEL_DIR = os.path.join(REPO_ROOT, "runs", "poker_mlp_v1")
@@ -117,6 +116,37 @@ class LiveHandTracker:
     def __init__(self, my_position: str, big_blind_size: float = 1.0):
         print("Initializing LiveHandTracker...")
         
+        # Initialize action distribution tracker (for instrumentation)
+        self.action_stats = {
+            'total_decisions': 0,
+            'action_counts': {action: 0 for action in CLASSES},
+            'context_counts': {
+                'preflop': {action: 0 for action in CLASSES},
+                'flop': {action: 0 for action in CLASSES},
+                'turn': {action: 0 for action in CLASSES},
+                'river': {action: 0 for action in CLASSES}
+            },
+            'sizing_context': {
+                'small_bet': {'raise_s': 0, 'raise_m': 0, 'raise_l': 0},
+                'medium_bet': {'raise_s': 0, 'raise_m': 0, 'raise_l': 0},
+                'large_bet': {'raise_s': 0, 'raise_m': 0, 'raise_l': 0}
+            },
+            'heuristic_triggers': {
+                'check_remap': 0,
+                'raise_sizing_downgrade': 0,
+                'fold_suppression': 0,
+                'call_preference': 0,
+                'preflop_aggression_inject': 0,
+                'big_bet_fold_guard': 0,
+                'river_call_catch': 0,
+                'pot_control_extension': 0
+                , 'preflop_defend_override': 0,
+                'preflop_open_inject': 0,
+                'preflop_squeeze_inject': 0,
+                'river_call_force': 0
+            }
+        }
+        
         # Load model metadata
         try:
             import json
@@ -136,6 +166,8 @@ class LiveHandTracker:
                 Cfg.fold_thresh = policy.get('fold_thresh', getattr(Cfg, 'fold_thresh', 0.0))
                 Cfg.fold_margin = policy.get('fold_margin', getattr(Cfg, 'fold_margin', 0.0))
                 Cfg.call_logit_bias = policy.get('call_logit_bias', getattr(Cfg, 'call_logit_bias', 0.0))
+                # Optional per-class logit biases to shape inference distribution
+                self.class_logit_bias = policy.get('class_logit_bias', {})
             except Exception:
                 pass
 
@@ -308,7 +340,7 @@ class LiveHandTracker:
         return torch.tensor(static_features, dtype=torch.float32).unsqueeze(0)
 
     def get_numeric_vector(self) -> np.ndarray:
-        # Build numeric features (must match training order)
+        # Build numeric features
         
         # Get raw CV values
         pot_chips = self.cv_data.get('pot_chips', 0.0)
@@ -323,14 +355,19 @@ class LiveHandTracker:
         stack_bb = stack_chips / self.bb_size
         opp_stack_bb = opp_stack_chips / self.bb_size
         raise_to_bb = last_bet_chips / self.bb_size
-        
+        last_bet_bb = last_bet_chips / self.bb_size
+
         # Calculate bet sizing as fraction of pot (key indicator)
         pot_before_bet = pot_chips - last_bet_chips
         pot_bb_before = pot_before_bet / self.bb_size if self.bb_size > 0 else 0.0
-        raise_size_bb = raise_to_bb - to_call_bb
+        
+        if to_call_bb > 1e-9:
+            raise_size_bb = last_bet_bb
+        else:
+            raise_size_bb = max(0.0, raise_to_bb - to_call_bb)
         bet_frac_of_pot = raise_size_bb / pot_bb_before if pot_bb_before > 1e-9 else 0.0
         
-        # Calculate position & game state features
+        # Calculate position and game state features
         in_position = self._calculate_in_position()
         was_pfr = self._calculate_was_pfr()
         raises_this_street = self._calculate_raises_this_street()
@@ -347,7 +384,7 @@ class LiveHandTracker:
         pot_type_single_raised = 1.0 if pot_type_str == "single_raised" else 0.0
         pot_type_three_bet = 1.0 if pot_type_str == "three_bet" else 0.0
 
-        # Assemble feature map (only the 15 features model uses)
+        # Assemble feature map 
         feature_map = {
             # Core money features (6)
             "pot_bb": pot_bb,
@@ -407,26 +444,441 @@ class LiveHandTracker:
         with torch.no_grad():
             logits = self.model(static_vec, numeric_tensor)
         
-        # Apply policy (calibration + biases + gating)
+    # Apply policy (calibration + biases + gating)
+    # Back-compat: call bias
         call_idx = CLASSES.index("call")
         logits[0, call_idx] = logits[0, call_idx] + Cfg.call_logit_bias
 
+        try:
+            if hasattr(self, 'class_logit_bias') and isinstance(self.class_logit_bias, dict):
+                for cls_name, bias in self.class_logit_bias.items():
+                    if cls_name in CLASSES and isinstance(bias, (int, float)):
+                        idx = CLASSES.index(cls_name)
+                        logits[0, idx] = logits[0, idx] + float(bias)
+        except Exception:
+            pass
+
         probs = torch.softmax(logits / self.learned_temperature, dim=1).squeeze()
-        
+
+    # Determine action legality
+        try:
+            idx_to_call = self.numeric_cols_order.index('to_call_bb')
+            to_call_bb_val = float(numeric_vec_unscaled[0, idx_to_call])
+        except Exception:
+            to_call_bb_val = 0.0
+
+    # Allowed actions depend on facing a bet
+        if to_call_bb_val > 1e-6:
+            # Facing a bet: cannot check; fold/call/raises are legal
+            allowed_actions = ["fold", "call", "raise_s", "raise_m", "raise_l"]
+        else:
+            # No bet to face: cannot fold or call; check/raises are legal
+            allowed_actions = ["check", "raise_s", "raise_m", "raise_l"]
+
+    # Fold-gating metrics
         p_fold = probs[CLASSES.index("fold")].item()
         p_nonfold_max = max(probs[i].item() for i, name in enumerate(CLASSES) if name != "fold")
         margin = p_fold - p_nonfold_max
-        
-        # Apply fold-gating policy
-        if p_fold >= Cfg.fold_thresh and margin >= Cfg.fold_margin:
-            action_index = CLASSES.index("fold")
+
+        # Apply fold-gating (only when legal)
+        if "fold" in allowed_actions and p_fold >= Cfg.fold_thresh and margin >= Cfg.fold_margin:
+            # Preflop: defend override vs small bet when call is viable
+            try:
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_to_call = self.numeric_cols_order.index('to_call_bb')
+                idx_pot = self.numeric_cols_order.index('pot_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                to_call_val = float(numeric_vec_unscaled[0, idx_to_call])
+                pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                p_call = probs[CLASSES.index('call')].item()
+                is_small_preflop_defend = (street_idx == 0 and to_call_val > 0 and to_call_val <= 0.6 and pot_val <= 1.5)
+                if is_small_preflop_defend and p_call >= 0.40 and p_fold < 0.60:
+                    action_name = 'call'
+                    self.action_stats['heuristic_triggers']['preflop_defend_override'] += 1
+                else:
+                    action_name = "fold"
+            except Exception:
+                action_name = "fold"
         else:
-            action_index = torch.argmax(probs).item()
-            
-        action_name = CLASSES[action_index]
+            # Choose best among allowed actions
+            best_name = None
+            best_prob = -1.0
+            for name in allowed_actions:
+                idx = CLASSES.index(name)
+                val = probs[idx].item()
+                if val > best_prob:
+                    best_prob = val
+                    best_name = name
+            action_name = best_name or CLASSES[int(torch.argmax(probs).item())]
+
+    # Remap illegal 'check' when facing a bet
+        try:
+            if to_call_bb_val > 1e-6 and action_name == 'check':
+                p_call = probs[CLASSES.index('call')].item()
+                p_fold_now = probs[CLASSES.index('fold')].item()
+                action_name = 'call' if p_call >= (p_fold_now - 0.05) else 'fold'
+                self.action_stats['heuristic_triggers']['check_remap'] += 1
+        except Exception:
+            pass
+
+    # Preflop: inject raise_s for ultra-passive opens (thresholded)
+        try:
+            if to_call_bb_val <= 1e-6 and action_name == 'check':
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_limped = self.numeric_cols_order.index('pot_type_limped')
+                idx_stack = self.numeric_cols_order.index('stack_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                pot_limped_val = float(numeric_vec_unscaled[0, idx_limped])
+                stack_val = float(numeric_vec_unscaled[0, idx_stack])
+                p_rs = probs[CLASSES.index('raise_s')].item()
+                p_fold_now = probs[CLASSES.index('fold')].item()
+                p_call = probs[CLASSES.index('call')].item()
+                
+                if (
+                    street_idx == 0 and pot_limped_val > 0.5 and 12.0 <= stack_val <= 35.0  # widened lower bound (was 18)
+                    and p_rs > 0.002 and 0.58 <= p_fold_now <= 0.72 and p_call >= 0.30
+                ):
+                    action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['preflop_open_inject'] += 1
+                elif (
+                    street_idx == 0 and 10.0 <= stack_val <= 35.0 and p_rs >= 0.003 and p_fold_now >= 0.58
+                ):
+                    action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['preflop_open_inject'] += 1
+        except Exception:
+            pass
+
+        try:
+            if to_call_bb_val <= 1e-6 and action_name == 'check':
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_pot = self.numeric_cols_order.index('pot_bb')
+                idx_stack = self.numeric_cols_order.index('stack_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                stack_val = float(numeric_vec_unscaled[0, idx_stack])
+                p_rm = probs[CLASSES.index('raise_m')].item()
+                p_rs = probs[CLASSES.index('raise_s')].item()
+                p_fold_now = probs[CLASSES.index('fold')].item()
+                # Trigger when pot already > 1.5BB (implied multi-limp) and raise_m tiny but present
+                if street_idx == 0 and pot_val >= 1.5 and 18.0 <= stack_val <= 35.0 and p_rm >= 0.001 and (p_rm + p_rs) > 0.005 and p_fold_now > 0.58:
+                    action_name = 'raise_m'
+                    self.action_stats['heuristic_triggers']['preflop_squeeze_inject'] += 1
+        except Exception:
+            pass
+
+    # Flop: suppress weak stabs on dry limped boards; protect shallow stacks
+        try:
+            if to_call_bb_val <= 1e-6 and action_name == 'raise_s':
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_raises_this = self.numeric_cols_order.index('raises_this_street')
+                idx_wet = self.numeric_cols_order.index('board_texture_wet')
+                idx_dry = self.numeric_cols_order.index('board_texture_dry')
+                idx_limped = self.numeric_cols_order.index('pot_type_limped')
+                idx_stack = self.numeric_cols_order.index('stack_bb')
+                idx_pot_val = self.numeric_cols_order.index('pot_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                raises_this = int(numeric_vec_unscaled[0, idx_raises_this])
+                board_wet_val = float(numeric_vec_unscaled[0, idx_wet])
+                board_dry_val = float(numeric_vec_unscaled[0, idx_dry])
+                pot_limped_val = float(numeric_vec_unscaled[0, idx_limped])
+                stack_val = float(numeric_vec_unscaled[0, idx_stack])
+                pot_val_for_shallow = float(numeric_vec_unscaled[0, idx_pot_val])
+
+                p_rs = probs[CLASSES.index('raise_s')].item()
+                p_call = probs[CLASSES.index('call')].item()
+                p_fold_now = probs[CLASSES.index('fold')].item()
+
+                # Shallow-stack protection exception: keep raise_s when stacks are very shallow (<2.5BB) and pot tiny (<0.5BB)
+                shallow_protection = stack_val <= 2.5 and pot_val_for_shallow < 0.5 and street_idx == 1 and raises_this == 0
+                if not shallow_protection and (
+                    street_idx == 1 and raises_this == 0 and pot_limped_val > 0.5 and board_dry_val > 0.5 and board_wet_val < 0.5
+                    and p_rs < 0.025 and p_call > 0.40 and (p_fold_now - p_call) < 0.07 and stack_val <= 6.0
+                ):
+                    action_name = 'check'
+                    self.action_stats['heuristic_triggers']['check_remap'] += 1
+                # Medium-stack extension of micro-raise suppression (avoid tiny stab even with >6BB when signal very weak)
+                elif (
+                    street_idx == 1 and raises_this == 0 and pot_limped_val > 0.5 and board_dry_val > 0.5
+                    and p_rs < 0.02 and p_call > 0.40 and (p_fold_now - p_call) < 0.10 and stack_val > 6.0 and stack_val <= 30.0
+                ):
+                    # Do not suppress flop protection raises when stacks are very shallow and pot is tiny
+                    idx_pot = self.numeric_cols_order.index('pot_bb')
+                    pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                    if stack_val <= 7.2 and pot_val <= 1.2:
+                        pass
+                    else:
+                        action_name = 'check'
+                        self.action_stats['heuristic_triggers']['check_remap'] += 1
+        except Exception:
+            pass
+
+    # River: force call vs small bets when call near thresholds
+        try:
+            if to_call_bb_val > 1e-6 and action_name in ['raise_s','raise_m','raise_l']:
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_pot = self.numeric_cols_order.index('pot_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                if street_idx == 3:
+                    p_call = probs[CLASSES.index('call')].item()
+                    p_current_raise = probs[CLASSES.index(action_name)].item()
+                    is_small_bet = (to_call_bb_val < 0.35 * pot_val) if pot_val > 0 else True
+                    if is_small_bet and p_call >= 0.18 and p_call >= 0.55 * p_current_raise:
+                        action_name = 'call'
+                        self.action_stats['heuristic_triggers']['river_call_force'] += 1
+        except Exception:
+            pass
+
+    # Preflop: inject raise_m in limped pots when minimal raise signal exists
+        try:
+            if to_call_bb_val <= 1e-6 and action_name in ['check', 'fold']:
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_limped = self.numeric_cols_order.index('pot_type_limped')
+                idx_raises_this = self.numeric_cols_order.index('raises_this_street')
+                idx_stack = self.numeric_cols_order.index('stack_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                pot_limped_val = float(numeric_vec_unscaled[0, idx_limped])
+                raises_this = int(numeric_vec_unscaled[0, idx_raises_this])
+                stack_val = float(numeric_vec_unscaled[0, idx_stack])
+                p_rm = probs[CLASSES.index('raise_m')].item()
+                p_rs = probs[CLASSES.index('raise_s')].item()
+                p_raise_sum = p_rm + p_rs + probs[CLASSES.index('raise_l')].item()
+                p_fold_now = probs[CLASSES.index('fold')].item()
+                # Only inject when truly passive context but some raise signal exists
+                if (
+                    street_idx == 0 and pot_limped_val > 0.5 and raises_this == 0 and 12.0 <= stack_val <= 35.0
+                    and p_rm > p_rs and p_raise_sum > 0.010 and p_fold_now > 0.55
+                ):
+                    action_name = 'raise_m'
+                    self.action_stats['heuristic_triggers']['preflop_aggression_inject'] += 1
+        except Exception:
+            pass
+
+    # Postflop: prefer call vs small bets when close
+        try:
+            if to_call_bb_val > 1e-6 and action_name in ['raise_s', 'raise_m', 'raise_l']:
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_pot = self.numeric_cols_order.index('pot_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                is_postflop = street_idx >= 1
+                is_small_bet = (to_call_bb_val < 0.5 * pot_val) if pot_val > 0 else True
+
+                p_call = probs[CLASSES.index('call')].item()
+                p_best_raise = max(probs[CLASSES.index('raise_s')].item(),
+                                   probs[CLASSES.index('raise_m')].item(),
+                                   probs[CLASSES.index('raise_l')].item())
+
+                # Prefer call when it's reasonably close to the best raise in small-bet postflop scenarios
+                if is_postflop and is_small_bet and p_call > 0.15 and p_best_raise > 0 and p_call >= 0.70 * p_best_raise:
+                    action_name = 'call'
+                    self.action_stats['heuristic_triggers']['call_preference'] += 1
+        except Exception:
+            pass
+
+    # River: downgrade marginal raises to call on small bets
+        try:
+            if to_call_bb_val > 1e-6 and action_name in ['raise_s', 'raise_m', 'raise_l']:
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_pot = self.numeric_cols_order.index('pot_bb')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                if street_idx == 3:  # river
+                    p_call = probs[CLASSES.index('call')].item()
+                    p_current_raise = probs[CLASSES.index(action_name)].item()
+                    is_small_bet = (to_call_bb_val < 0.35 * pot_val) if pot_val > 0 else True
+                    if is_small_bet and p_call >= 0.18 and p_call >= 0.60 * p_current_raise:
+                        action_name = 'call'
+                        self.action_stats['heuristic_triggers']['river_call_catch'] += 1
+        except Exception:
+            pass
+
+    # Sizing: downgrade raise_m to raise_s at small pot fractions (relaxed thresholds)
+        original_action = action_name
+        try:
+            if action_name == 'raise_m':
+                idx_bfp = self.numeric_cols_order.index('bet_frac_of_pot')
+                bet_frac_val = float(numeric_vec_unscaled[0, idx_bfp])
+                p_rs = probs[CLASSES.index('raise_s')].item()
+                p_rm = probs[CLASSES.index('raise_m')].item()
+                
+                # Condition 1: Broader sizing window and lower ratio
+                if p_rm > 0 and bet_frac_val < 0.55 and p_rs >= 0.45 * p_rm:
+                    action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['raise_sizing_downgrade'] += 1
+                # Condition 2: Absolute cap for moderate confidence with small sizing
+                elif bet_frac_val < 0.40 and p_rm < 0.65:
+                    action_name = 'raise_s'
+                    self.action_stats['heuristic_triggers']['raise_sizing_downgrade'] += 1
+        except Exception:
+            pass
         
-        # Format probabilities
+    # Suppress fold vs small bets when reasonable alternatives exist
+        if action_name == 'fold':
+            try:
+                # Get context indicators
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_to_call = self.numeric_cols_order.index('to_call_bb')
+                idx_pot = self.numeric_cols_order.index('pot_bb')
+                idx_bfp = self.numeric_cols_order.index('bet_frac_of_pot')
+
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                to_call_val = float(numeric_vec_unscaled[0, idx_to_call])
+                pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                bet_frac_val = float(numeric_vec_unscaled[0, idx_bfp])
+
+                is_postflop = street_idx >= 1  # flop, turn, river
+                is_small_bet = (to_call_val < 0.5 * pot_val) if pot_val > 0 else True
+
+                # Get alternative action probabilities
+                p_call = probs[CLASSES.index('call')].item()
+                p_raise_s = probs[CLASSES.index('raise_s')].item()
+                p_raise_m = probs[CLASSES.index('raise_m')].item()
+                p_raise_l = probs[CLASSES.index('raise_l')].item()
+                p_check = probs[CLASSES.index('check')].item()
+
+                max_aggressive = max(p_raise_s, p_raise_m, p_raise_l, p_call, p_check)
+
+                # Suppress fold when facing small bets with reasonable alternatives
+                if to_call_val > 1e-6 and is_postflop and is_small_bet and p_fold < 0.60 and max_aggressive > 0.12:
+                    # Choose the best non-fold legal action
+                    candidate_names = [n for n in allowed_actions if n != 'fold']
+                    best_name = max(candidate_names, key=lambda n: probs[CLASSES.index(n)].item())
+                    action_name = best_name
+                    self.action_stats['heuristic_triggers']['fold_suppression'] += 1
+                # Big bet fold guard extension: keep fold when large bet and raise_m spuriously dominates with weak overall support
+                elif to_call_val > 1e-6 and bet_frac_val >= 0.75 and street_idx >= 1:
+                    # If we somehow downmapped to a non-fold earlier, reselect fold when fold prob reasonably high
+                    # (Handled only when current action_name already 'fold') so no change needed
+                    pass
+            except Exception:
+                pass
+
+    # Guard vs large bets: prefer fold when raise_m dominates with low call
+        try:
+            if action_name == 'raise_m' and to_call_bb_val > 1e-6:
+                idx_bfp = self.numeric_cols_order.index('bet_frac_of_pot')
+                bet_frac_val = float(numeric_vec_unscaled[0, idx_bfp])
+                if bet_frac_val >= 0.75:
+                    p_fold_now = probs[CLASSES.index('fold')].item()
+                    p_call = probs[CLASSES.index('call')].item()
+                    p_rm = probs[CLASSES.index('raise_m')].item()
+                    # Conditions signaling likely over-aggression on polarized / high-pressure bet
+                    if p_fold_now >= 0.18 and p_rm >= 0.40 and p_call < 0.15:
+                        action_name = 'fold'
+                        self.action_stats['heuristic_triggers']['big_bet_fold_guard'] += 1
+                    # Extreme pressure scenario: absurd bet fraction (>2.0 pot) with raise_m dominating while fold+call negligible -> force fold
+                    elif bet_frac_val >= 2.0 and p_rm > 0.75 and (p_fold_now + p_call) < 0.05:
+                        action_name = 'fold'
+                        self.action_stats['heuristic_triggers']['big_bet_fold_guard'] += 1
+        except Exception:
+            pass
+
+    # River large-bet fold guard
+        try:
+            if action_name in ['raise_s','raise_m','raise_l'] and to_call_bb_val > 1e-6:
+                idx_street = self.numeric_cols_order.index('street_index')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                if street_idx == 3:  # river
+                    idx_bfp = self.numeric_cols_order.index('bet_frac_of_pot')
+                    bet_frac_val = float(numeric_vec_unscaled[0, idx_bfp])
+                    p_fold_now = probs[CLASSES.index('fold')].item()
+                    p_call = probs[CLASSES.index('call')].item()
+                    p_rm = probs[CLASSES.index('raise_m')].item()
+                    # Guard triggers when facing >=0.60 pot bet, fold probability exceeds call, and raise_m leads mostly due to skewed logits
+                    if bet_frac_val >= 0.60 and p_fold_now >= 0.25 and p_call < 0.15 and p_rm > (p_fold_now + 0.05):
+                        action_name = 'fold'
+                        self.action_stats['heuristic_triggers']['big_bet_fold_guard'] += 1
+        except Exception:
+            pass
+        
+        
+
+    # No-bet pots: avoid thin stabs; add turn pot control
+        try:
+            if to_call_bb_val <= 1e-6 and action_name in ['raise_s', 'raise_m', 'raise_l']:
+                idx_was_pfr = self.numeric_cols_order.index('was_pfr')
+                idx_raises_this = self.numeric_cols_order.index('raises_this_street')
+                idx_street = self.numeric_cols_order.index('street_index')
+                idx_wet = self.numeric_cols_order.index('board_texture_wet')
+                idx_dry = self.numeric_cols_order.index('board_texture_dry')
+                idx_limped = self.numeric_cols_order.index('pot_type_limped')
+                was_pfr_val = float(numeric_vec_unscaled[0, idx_was_pfr])
+                raises_this = int(numeric_vec_unscaled[0, idx_raises_this])
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                board_wet_val = float(numeric_vec_unscaled[0, idx_wet])
+                board_dry_val = float(numeric_vec_unscaled[0, idx_dry])
+                pot_limped_val = float(numeric_vec_unscaled[0, idx_limped])
+                p_raises_sum = (probs[CLASSES.index('raise_s')].item() +
+                                probs[CLASSES.index('raise_m')].item() +
+                                probs[CLASSES.index('raise_l')].item())
+                p_raise_s = probs[CLASSES.index('raise_s')].item()
+                p_raise_m = probs[CLASSES.index('raise_m')].item()
+                p_raise_l = probs[CLASSES.index('raise_l')].item()
+                p_call = probs[CLASSES.index('call')].item()
+                max_raise = max(p_raise_s, p_raise_m, p_raise_l)
+
+                # FLOP: suppress thin stabs only on WET boards with extremely weak raise signal
+                if street_idx == 1 and was_pfr_val < 0.5 and raises_this == 0 and board_wet_val > 0.5 and p_raises_sum < 0.02:
+                    action_name = 'check'
+                    self.action_stats['heuristic_triggers']['check_remap'] += 1
+
+                # TURN: pot control in limped, dry, passive pots when raises are small overall
+                # Prefer check if model's call appetite (were it legal) exceeds fold, but we're not facing a bet (to_call=0)
+                elif (
+                    street_idx == 2 and was_pfr_val < 0.5 and raises_this == 0 and board_dry_val > 0.5 and pot_limped_val > 0.5
+                    and p_raises_sum < 0.12 and (p_call + 0.02) >= probs[CLASSES.index('fold')].item()
+                ):
+                    idx_stack = self.numeric_cols_order.index('stack_bb')
+                    stack_val = float(numeric_vec_unscaled[0, idx_stack])
+                    # Original guard limited to <=5.2BB; extend modest pot-control up to 15BB for very weak raise signals
+                    if stack_val <= 5.2 or (stack_val <= 15.0 and p_raises_sum < 0.08):
+                        action_name = 'check'
+                        if stack_val > 5.2:
+                            self.action_stats['heuristic_triggers']['pot_control_extension'] += 1
+                        else:
+                            self.action_stats['heuristic_triggers']['check_remap'] += 1
+        except Exception:
+            pass
+        
+    # Format probabilities
         prob_dict = {name: f"{p.item():.4f}" for name, p in zip(CLASSES, probs)}
+
+    # River fallback: force call vs small bets when near thresholds
+        try:
+            if action_name in ['raise_s','raise_m','raise_l'] and 'street_index' in self.numeric_cols_order:
+                idx_street = self.numeric_cols_order.index('street_index')
+                street_idx = int(numeric_vec_unscaled[0, idx_street])
+                if street_idx == 3 and to_call_bb_val > 1e-6:
+                    idx_pot = self.numeric_cols_order.index('pot_bb')
+                    pot_val = float(numeric_vec_unscaled[0, idx_pot])
+                    p_call = probs[CLASSES.index('call')].item()
+                    p_current_raise = probs[CLASSES.index(action_name)].item()
+                    is_small_bet = (to_call_bb_val < 0.40 * pot_val) if pot_val > 0 else True
+                    if is_small_bet and p_call >= 0.17 and p_call >= 0.55 * p_current_raise:
+                        action_name = 'call'
+                        self.action_stats['heuristic_triggers']['river_call_force'] += 1
+        except Exception:
+            pass
+        
+        # Update action statistics
+        self.action_stats['total_decisions'] += 1
+        self.action_stats['action_counts'][action_name] += 1
+        self.action_stats['context_counts'][self.current_street][action_name] += 1
+        
+        # Track sizing context
+        try:
+            idx_bfp = self.numeric_cols_order.index('bet_frac_of_pot')
+            bet_frac_val = float(numeric_vec_unscaled[0, idx_bfp])
+            if action_name in ['raise_s', 'raise_m', 'raise_l']:
+                if bet_frac_val < 0.35:
+                    self.action_stats['sizing_context']['small_bet'][action_name] += 1
+                elif bet_frac_val < 0.70:
+                    self.action_stats['sizing_context']['medium_bet'][action_name] += 1
+                else:
+                    self.action_stats['sizing_context']['large_bet'][action_name] += 1
+        except Exception:
+            pass
         
         print(f"Unscaled Features: {numeric_vec_unscaled.round(2)}")
         print(f"Scaled Features: {numeric_vec_scaled.round(2)}")
@@ -435,6 +887,55 @@ class LiveHandTracker:
         print(f"==> FINAL ACTION: {action_name}")
         
         return action_name, prob_dict
+    
+    def print_action_statistics(self):
+        """Print comprehensive action distribution statistics"""
+        stats = self.action_stats
+        total = stats['total_decisions']
+        
+        if total == 0:
+            print("No decisions tracked yet.")
+            return
+        
+        print("\n" + "=" * 80)
+        print("ACTION DISTRIBUTION STATISTICS")
+        print("=" * 80)
+        
+        print(f"\nTotal Decisions: {total}")
+        print("\nOverall Action Distribution:")
+        for action in CLASSES:
+            count = stats['action_counts'][action]
+            pct = (count / total * 100) if total > 0 else 0
+            print(f"  {action:12s}: {count:4d} ({pct:5.1f}%)")
+        
+        print("\nAction Distribution by Street:")
+        for street in ['preflop', 'flop', 'turn', 'river']:
+            street_total = sum(stats['context_counts'][street].values())
+            if street_total > 0:
+                print(f"\n  {street.capitalize()}:")
+                for action in CLASSES:
+                    count = stats['context_counts'][street][action]
+                    pct = (count / street_total * 100) if street_total > 0 else 0
+                    if count > 0:
+                        print(f"    {action:12s}: {count:4d} ({pct:5.1f}%)")
+        
+        print("\nRaise Sizing Context:")
+        for context in ['small_bet', 'medium_bet', 'large_bet']:
+            context_total = sum(stats['sizing_context'][context].values())
+            if context_total > 0:
+                print(f"\n  {context.replace('_', ' ').title()} (<0.35 / 0.35-0.70 / >0.70 pot):")
+                for action in ['raise_s', 'raise_m', 'raise_l']:
+                    count = stats['sizing_context'][context][action]
+                    pct = (count / context_total * 100) if context_total > 0 else 0
+                    if count > 0:
+                        print(f"    {action:12s}: {count:4d} ({pct:5.1f}%)")
+        
+        print("\nHeuristic Trigger Counts:")
+        for heuristic, count in stats['heuristic_triggers'].items():
+            pct = (count / total * 100) if total > 0 else 0
+            print(f"  {heuristic.replace('_', ' ').title():30s}: {count:4d} ({pct:5.1f}%)")
+        
+        print("=" * 80 + "\n")
 
 
 # Global tracker instance and BB normalizer
@@ -443,50 +944,10 @@ _bb_normalizer = None  # Will be set from first hand (hand_id=1) to detect actua
 
 
 def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Main entry point for CV system integration.
-    Call this function with orchestrator JSON data to get poker action recommendation.
-    
-    Orchestrator JSON format (as per sample_orchestrator_outputs.json):
-    {
-        "hand_id": 1,
-        "player_id": 1,
-        "round": "preflop",           # 'preflop', 'flop', 'turn', 'river'
-        "hole1": "HA",                # Hero's first card (suit+rank format: HA = Ace of Hearts)
-        "hole2": "DK",                # Hero's second card (DK = King of Diamonds)
-        "flop1": "C2",                # Flop card 1 (C2 = 2 of Clubs)
-        "flop2": "H7",                # Flop card 2
-        "flop3": "DT",                # Flop card 3
-        "turn": "DA",                 # Turn card (DA = Ace of Diamonds)
-        "river": "HK",                # River card
-        "stack_bb": 170,              # Hero's stack in big blinds
-        "opp_stack_bb": 165,          # Opponent's stack in big blinds
-        "to_call_bb": 5,              # Amount to call in big blinds
-        "pot_bb": 10,                 # Current pot size in big blinds
-        "action": "",                 # (not used for prediction - this is what we're predicting)
-        "final_pot_bb": ""            # (not used)
-    }
-    
-    Returns:
-    {
-        "action": "raise_m",          # Recommended action: fold/check/call/raise_s/raise_m/raise_l
-        "confidence": 0.85,           # Confidence (0-1)
-        "probabilities": {            # All action probabilities
-            "fold": "0.0500",
-            "check": "0.1000",
-            "call": "0.1500",
-            "raise_s": "0.2000",
-            "raise_m": "0.3500",
-            "raise_l": "0.1500"
-        },
-        "features": {                 # Debug info: extracted features
-            "pot_bb": 10.0,
-            "to_call_bb": 5.0,
-            "stack_bb": 170.0,
-            "bet_frac_of_pot": 0.5,
-            ...
-        }
-    }
+    """Entry point for orchestrator integration.
+
+    Expects a single-hand snapshot (cards, stacks, pot, to_call, street, ids) and
+    returns an action recommendation with probabilities and extracted features.
     """
     global _tracker, _bb_normalizer
     
@@ -553,10 +1014,6 @@ def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
     to_call_bb = to_call_chips / _bb_normalizer
     stack_bb = stack_chips / _bb_normalizer
     opp_stack_bb = opp_stack_chips / _bb_normalizer
-    
-    # Calculate last bet size (the amount opponent raised)
-    # If to_call > 0, the opponent bet to_call amount
-    # For sizing calculations, we need the raise size relative to previous pot
     last_bet_bb = to_call_bb
     
     # Convert to tracker internal format
@@ -706,7 +1163,6 @@ if __name__ == "__main__":
     print(f"Confidence: {result['confidence']:.2%}")
     
     print("\n" + "=" * 80)
-    print("✓ Integration ready! Call main(cv_json) from orchestrator.")
-    print("✓ Card format: [Suit][Rank] (HA=A♥, DK=K♦, C2=2♣, etc.)")
-    print("✓ All values already in BB - no conversion needed")
+    print("Integration ready! Call main(cv_json) from orchestrator.")
+    print("All values already in BB - no conversion needed")
     print("=" * 80)
