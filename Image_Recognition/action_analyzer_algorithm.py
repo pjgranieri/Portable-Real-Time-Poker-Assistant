@@ -77,7 +77,7 @@ class ActionAnalyzer:
     def _detect_chips_by_color(self, image_path):
         """
         Fallback chip detection using color analysis
-        STRICT FILTERING - only circular RED objects (poker chips)
+        VERY STRICT - only detect obvious circular RED poker chips
         """
         try:
             full_image = cv2.imread(image_path)
@@ -90,82 +90,100 @@ class ActionAnalyzer:
             # Convert to HSV
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             
-            # Detect ONLY RED chips (not blue cards, not white hands)
-            # Red wraps around in HSV, so we need two ranges
-            lower_red1 = np.array([0, 100, 100])  # Increased saturation threshold
+            # Detect ONLY bright RED chips (very strict saturation/value)
+            lower_red1 = np.array([0, 120, 100])  # High saturation (was 50)
             upper_red1 = np.array([10, 255, 255])
-            lower_red2 = np.array([170, 100, 100])  # Increased saturation threshold
+            lower_red2 = np.array([170, 120, 100])  # High saturation (was 50)
             upper_red2 = np.array([180, 255, 255])
             
             mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
             mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
             red_mask = cv2.bitwise_or(mask1, mask2)
             
-            # Exclude skin tones (hands/fingers being detected as chips)
-            lower_skin = np.array([0, 15, 50])
-            upper_skin = np.array([25, 255, 255])
+            # Exclude skin tones (hands)
+            lower_skin = np.array([0, 10, 50])
+            upper_skin = np.array([30, 255, 255])
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             
-            # Exclude blue (card backs being detected as chips)
-            lower_blue = np.array([70, 20, 20])
-            upper_blue = np.array([150, 255, 255])
+            # Exclude blue (card backs)
+            lower_blue = np.array([85, 30, 30])
+            upper_blue = np.array([135, 255, 255])
             blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
             
-            # Remove skin and blue from red mask
+            # Exclude white/light colors (cards, table reflections)
+            lower_white = np.array([0, 0, 180])
+            upper_white = np.array([180, 50, 255])
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+            
+            # Remove ALL exclusions from red mask
             red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(skin_mask))
             red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(blue_mask))
+            red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(white_mask))
             
-            # Clean up noise
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            # Aggressive noise removal
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
             red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=2)
-            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
             
-            # Find circular contours
+            # Find contours
             contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             chip_count = 0
-            img_area = image.shape[0] * image.shape[1]
+            img_height, img_width = image.shape[:2]
+            img_area = img_height * img_width
             
             for contour in contours:
                 area = cv2.contourArea(contour)
                 
-                # Chip should be 150-10000 pixels (reasonable chip size)
-                if not (150 < area < 10000):
+                # Chip must be substantial size (200-8000 pixels)
+                if not (200 < area < 8000):
                     continue
                 
-                # Check if it's circular
+                # Check circularity (must be VERY circular)
                 perimeter = cv2.arcLength(contour, True)
                 if perimeter == 0:
                     continue
                 
                 circularity = 4 * np.pi * area / (perimeter ** 2)
                 
-                # STRICT: Chips must be VERY circular (0.7 to 1.0)
-                if circularity < 0.7:
+                # VERY STRICT: Must be almost perfectly circular (0.75+)
+                if circularity < 0.75:
                     continue
                 
-                # Additional check: aspect ratio should be close to 1:1
+                # Check aspect ratio (must be nearly 1:1)
                 x, y, w, h = cv2.boundingRect(contour)
                 aspect_ratio = w / h if h > 0 else 0
                 
-                # Chips are circular, so aspect ratio should be close to 1
-                if not (0.7 < aspect_ratio < 1.4):
+                # VERY STRICT: Must be nearly square
+                if not (0.85 < aspect_ratio < 1.15):
                     continue
                 
-                # Check if region is predominantly red (not just edges)
+                # Additional check: region must be PREDOMINANTLY red
                 region_mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 cv2.drawContours(region_mask, [contour], -1, 255, -1)
                 
                 red_pixels = cv2.bitwise_and(red_mask, region_mask)
                 red_ratio = np.sum(red_pixels > 0) / np.sum(region_mask > 0) if np.sum(region_mask > 0) > 0 else 0
                 
-                # At least 60% of the region should be red
-                if red_ratio < 0.6:
+                # At least 70% of region must be red (was 60%)
+                if red_ratio < 0.70:
+                    continue
+                
+                # Check if chip is in reasonable location (not at extreme edges)
+                center_x = x + w // 2
+                center_y = y + h // 2
+                
+                # Reject chips at very edge of image (likely artifacts)
+                edge_margin = 0.05
+                if (center_x < img_width * edge_margin or 
+                    center_x > img_width * (1 - edge_margin) or
+                    center_y < img_height * edge_margin or 
+                    center_y > img_height * (1 - edge_margin)):
                     continue
                 
                 chip_count += 1
             
-            print(f"[COLOR CHIP DETECTION] Found {chip_count} red chips (strict filtering)")
+            print(f"[COLOR CHIP DETECTION] Found {chip_count} red chips (very strict)")
             return chip_count
             
         except Exception as e:
@@ -175,7 +193,7 @@ class ActionAnalyzer:
             return 0
     
     def check_chips(self, image_path):
-        """Check for chips - try YOLO first, then color detection as fallback"""
+        """Check for chips - ONLY use YOLO, disable unreliable color fallback"""
         if self.chip_model is None:
             return False, []
         
@@ -196,8 +214,8 @@ class ActionAnalyzer:
                 temp_path = tmp.name
             
             try:
-                # Run YOLO on CROPPED image (lower confidence for small chips)
-                results = self.chip_model(temp_path, conf=0.35, verbose=False)  # Lowered threshold
+                # Run YOLO on CROPPED image
+                results = self.chip_model(temp_path, conf=0.35, verbose=False)
                 
                 detected_chips = []
                 raw_detections = []
@@ -230,22 +248,15 @@ class ActionAnalyzer:
                 
                 print(f"[CHIP DETECTION] Found {len(chip_labels)} valid chips after filtering")
                 
-                # FALLBACK: If YOLO found nothing, try color detection
-                if len(chip_labels) == 0:
-                    print("[CHIP DETECTION] YOLO found 0 chips, trying color detection...")
-                    color_chip_count = self._detect_chips_by_color(image_path)
-                    
-                    if color_chip_count > 0:
-                        # Create dummy labels for color-detected chips
-                        chip_labels = ['Chip_Color'] * color_chip_count
-                        print(f"[CHIP DETECTION] Color method found {color_chip_count} chips!")
+                # DISABLE COLOR FALLBACK - too unreliable
+                # Only use YOLO results
                 
                 return len(chip_labels) > 0, chip_labels
             
             finally:
                 # Clean up temp file
                 os.unlink(temp_path)
-            
+        
         except Exception as e:
             print(f"[ERROR] Chip detection failed: {e}")
             import traceback

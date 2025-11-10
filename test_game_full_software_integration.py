@@ -63,9 +63,9 @@ class CVInputInterface:
         # Grace period after processing (seconds)
         self.grace_period = 10
         
-        # ADD CONFIDENCE THRESHOLD
-        self.card_confidence_threshold = 0.50  # 50% for card detection
-        self.chip_confidence_threshold = 0.70  # 70% for chip detection (chips might need lower threshold)
+        # LOWER CHIP THRESHOLD TO MATCH ACTION ANALYZER
+        self.card_confidence_threshold = 0.40  # For card detection
+        self.chip_confidence_threshold = 0.70  # CHANGED from 0.70 to 0.35 (match action_analyzer)
     
     def apply_grace_period(self):
         """Apply a grace period delay after processing an image"""
