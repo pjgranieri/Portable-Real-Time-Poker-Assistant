@@ -13,9 +13,8 @@ except ImportError:
     print("[WARNING] MediaPipe not available. Hand detection will be disabled.")
 
 class ActionAnalyzer:
-    def __init__(self, confidence_threshold=0.9):
+    def __init__(self, confidence_threshold=0.50):
         self.confidence_threshold = confidence_threshold
-        # Get the directory where this script is located
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         
         # Load YOLO models
@@ -25,238 +24,489 @@ class ActionAnalyzer:
         self.chip_model = YOLO(chip_model_path)
         self.chip_amount_model = YOLO(chip_amount_model_path)
         
-        # Initialize MediaPipe Hand Detection if available
+        # CONFIDENCE THRESHOLDS
+        self.fold_confidence_threshold = 0.30  # Lowered from 0.40
+        self.check_confidence_threshold = 0.40
+        
+        # ROI CROPPING - Use 65% to include more of the table
+        self.table_crop_factor = 0.35  # Start from 35% down (include bottom 65%)
+        
+        # Initialize MediaPipe
         self.hands = None
         if MEDIAPIPE_AVAILABLE:
             try:
                 self.hands = mp_hands.Hands(
                     static_image_mode=True,
                     max_num_hands=2,
-                    min_detection_confidence=0.7,
-                    min_tracking_confidence=0.7
+                    min_detection_confidence=0.3,
+                    min_tracking_confidence=0.3
                 )
+                print("[INFO] MediaPipe Hands initialized successfully")
             except Exception as e:
                 print(f"[WARNING] Could not initialize MediaPipe hands: {e}")
                 self.hands = None
     
+    def _verify_hand_landmarks(self, hand_landmarks, image_shape):
+        """Verify that hand landmarks are valid and visible"""
+        if hand_landmarks is None or len(hand_landmarks.landmark) != 21:
+            return False
+        
+        height, width = image_shape[:2]
+        
+        # Count how many landmarks are in bounds
+        valid_landmarks = 0
+        for landmark in hand_landmarks.landmark:
+            x, y = landmark.x * width, landmark.y * height
+            if 0 <= x <= width and 0 <= y <= height:
+                valid_landmarks += 1
+        
+        # At least 15 out of 21 landmarks should be visible
+        return valid_landmarks >= 15
+    
+    def _crop_to_table_region(self, image):
+        """Crop image to focus on table area - bottom 65% of image"""
+        h, w = image.shape[:2]
+        
+        # Crop to bottom 65% of image (start from 35% down)
+        crop_top = int(h * self.table_crop_factor)
+        
+        cropped = image[crop_top:h, 0:w]
+        
+        return cropped
+    
+    def _detect_chips_by_color(self, image_path):
+        """
+        Fallback chip detection using color analysis
+        STRICT FILTERING - only circular RED objects (poker chips)
+        """
+        try:
+            full_image = cv2.imread(image_path)
+            if full_image is None:
+                return 0
+            
+            # Crop to table region
+            image = self._crop_to_table_region(full_image)
+            
+            # Convert to HSV
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            
+            # Detect ONLY RED chips (not blue cards, not white hands)
+            # Red wraps around in HSV, so we need two ranges
+            lower_red1 = np.array([0, 100, 100])  # Increased saturation threshold
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 100, 100])  # Increased saturation threshold
+            upper_red2 = np.array([180, 255, 255])
+            
+            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            red_mask = cv2.bitwise_or(mask1, mask2)
+            
+            # Exclude skin tones (hands/fingers being detected as chips)
+            lower_skin = np.array([0, 15, 50])
+            upper_skin = np.array([25, 255, 255])
+            skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            
+            # Exclude blue (card backs being detected as chips)
+            lower_blue = np.array([70, 20, 20])
+            upper_blue = np.array([150, 255, 255])
+            blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+            
+            # Remove skin and blue from red mask
+            red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(skin_mask))
+            red_mask = cv2.bitwise_and(red_mask, cv2.bitwise_not(blue_mask))
+            
+            # Clean up noise
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            
+            # Find circular contours
+            contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            chip_count = 0
+            img_area = image.shape[0] * image.shape[1]
+            
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                
+                # Chip should be 150-10000 pixels (reasonable chip size)
+                if not (150 < area < 10000):
+                    continue
+                
+                # Check if it's circular
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter == 0:
+                    continue
+                
+                circularity = 4 * np.pi * area / (perimeter ** 2)
+                
+                # STRICT: Chips must be VERY circular (0.7 to 1.0)
+                if circularity < 0.7:
+                    continue
+                
+                # Additional check: aspect ratio should be close to 1:1
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / h if h > 0 else 0
+                
+                # Chips are circular, so aspect ratio should be close to 1
+                if not (0.7 < aspect_ratio < 1.4):
+                    continue
+                
+                # Check if region is predominantly red (not just edges)
+                region_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+                cv2.drawContours(region_mask, [contour], -1, 255, -1)
+                
+                red_pixels = cv2.bitwise_and(red_mask, region_mask)
+                red_ratio = np.sum(red_pixels > 0) / np.sum(region_mask > 0) if np.sum(region_mask > 0) > 0 else 0
+                
+                # At least 60% of the region should be red
+                if red_ratio < 0.6:
+                    continue
+                
+                chip_count += 1
+            
+            print(f"[COLOR CHIP DETECTION] Found {chip_count} red chips (strict filtering)")
+            return chip_count
+            
+        except Exception as e:
+            print(f"[ERROR] Color chip detection failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
+    
     def check_chips(self, image_path):
-        """Check for chips - with enhanced filtering for false positives"""
+        """Check for chips - try YOLO first, then color detection as fallback"""
         if self.chip_model is None:
-            print("[MOCK] No chip model - simulating 2 chips detected")
-            return True, ['Chip', 'Chip']
+            return False, []
         
         try:
-            results = self.chip_model(image_path, conf=self.confidence_threshold, verbose=False)
-            
-            chip_detections = []  # Store (confidence, bbox, class_name)
-            
-            image = cv2.imread(image_path)
-            if image is None:
+            # Read image and crop to table region
+            full_image = cv2.imread(image_path)
+            if full_image is None:
+                print(f"[ERROR] Could not read image: {image_path}")
                 return False, []
             
-            img_height, img_width = image.shape[:2]
-            img_area = img_height * img_width
+            # CROP TO TABLE
+            image = self._crop_to_table_region(full_image)
             
-            for result in results:
-                for box in result.boxes:
-                    class_id = int(box.cls[0])
-                    class_name = result.names[class_id]
-                    confidence = float(box.conf[0])
-                    bbox = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
-                    
-                    # FILTER 1: Only accept "Chip" class
-                    if 'chip' not in class_name.lower():
-                        continue
-                    
-                    # FILTER 2: Check aspect ratio (chips should be roughly circular/square)
-                    width = bbox[2] - bbox[0]
-                    height = bbox[3] - bbox[1]
-                    aspect_ratio = width / height if height > 0 else 0
-                    
-                    # TIGHTENED: Chips should have aspect ratio between 0.8 and 1.25
-                    if aspect_ratio < 0.8 or aspect_ratio > 1.25:
-                        print(f"[FILTER] Ignoring detection - bad aspect ratio: {aspect_ratio:.2f}")
-                        continue
-                    
-                    # FILTER 3: Size check - chips shouldn't be too large or too small
-                    area = width * height
-                    relative_area = area / img_area
-                    
-                    # TIGHTENED: Chip can be 1% to 40% of image area
-                    if relative_area < 0.01 or relative_area > 0.40:
-                        print(f"[FILTER] Ignoring detection - bad size: {relative_area*100:.2f}% of image")
-                        continue
-                    
-                    # FILTER 4: Position check - chips usually in center/lower area
-                    center_x = (bbox[0] + bbox[2]) / 2
-                    center_y = (bbox[1] + bbox[3]) / 2
-                    norm_x = center_x / img_width
-                    
-                    # NEW: Chips typically in middle 70% horizontally
-                    if norm_x < 0.15 or norm_x > 0.85:
-                        print(f"[FILTER] Ignoring detection - too far horizontally: {norm_x:.2f}")
-                        continue
-                    
-                    # FILTER 5: Enhanced color check - chips should have consistent colors (not skin-like)
-                    if not self._verify_chip_color_enhanced(image, bbox):
-                        print(f"[FILTER] Ignoring detection - failed color verification")
-                        continue
-                    
-                    # FILTER 6: Texture analysis
-                    if not self._verify_chip_texture(image, bbox):
-                        print(f"[FILTER] Ignoring detection - failed texture verification")
-                        continue
-                    
-                    chip_detections.append((confidence, bbox, class_name))
+            # Save cropped image temporarily for YOLO
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                cv2.imwrite(tmp.name, image)
+                temp_path = tmp.name
             
-            # FILTER 7: Non-maximum suppression
-            chip_detections = self._non_maximum_suppression(chip_detections, iou_threshold=0.5)
+            try:
+                # Run YOLO on CROPPED image (lower confidence for small chips)
+                results = self.chip_model(temp_path, conf=0.35, verbose=False)  # Lowered threshold
+                
+                detected_chips = []
+                raw_detections = []
+                
+                # Collect all detections
+                for result in results:
+                    for box in result.boxes:
+                        class_id = int(box.cls[0])
+                        chip_label = result.names[class_id]
+                        confidence = float(box.conf[0])
+                        bbox = box.xyxy[0].cpu().numpy()
+                        
+                        raw_detections.append((confidence, chip_label, bbox))
+                
+                print(f"[CHIP DETECTION] Raw YOLO detections: {len(raw_detections)}")
+                
+                # Strict filtering
+                for confidence, chip_label, bbox in raw_detections:
+                    is_valid_chip = self._verify_is_chip(image, bbox)
+                    
+                    if is_valid_chip:
+                        detected_chips.append((confidence, chip_label, bbox))
+                    else:
+                        print(f"  [FILTER] Rejected {chip_label} - failed validation")
+                
+                # Apply NMS
+                detected_chips = self._non_maximum_suppression(detected_chips, iou_threshold=0.4)
+                
+                chip_labels = [label for _, label, _ in detected_chips]
+                
+                print(f"[CHIP DETECTION] Found {len(chip_labels)} valid chips after filtering")
+                
+                # FALLBACK: If YOLO found nothing, try color detection
+                if len(chip_labels) == 0:
+                    print("[CHIP DETECTION] YOLO found 0 chips, trying color detection...")
+                    color_chip_count = self._detect_chips_by_color(image_path)
+                    
+                    if color_chip_count > 0:
+                        # Create dummy labels for color-detected chips
+                        chip_labels = ['Chip_Color'] * color_chip_count
+                        print(f"[CHIP DETECTION] Color method found {color_chip_count} chips!")
+                
+                return len(chip_labels) > 0, chip_labels
             
-            chip_labels = [det[2] for det in chip_detections]
-            
-            print(f"[CHIP DETECTION] Found {len(chip_labels)} valid chips after filtering")
-            return len(chip_labels) > 0, chip_labels
+            finally:
+                # Clean up temp file
+                os.unlink(temp_path)
             
         except Exception as e:
             print(f"[ERROR] Chip detection failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False, []
     
-    def _verify_chip_color_enhanced(self, image, bbox):
-        """Enhanced color verification to avoid skin tones and ensure chip-like colors"""
+    def _verify_is_chip(self, image, bbox):
+        """Verify detection is actually a chip, not a card or hand"""
         try:
             x1, y1, x2, y2 = map(int, bbox)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
             
-            region = image[y1:y2, x1:x2]
+            # Ensure valid coordinates
+            h, w = image.shape[:2]
+            x1, x2 = max(0, x1), min(w, x2)
+            y1, y2 = max(0, y1), min(h, y2)
             
-            if region.size == 0:
+            if x2 <= x1 or y2 <= y1:
                 return False
             
-            # Convert to HSV for better color analysis
+            region = image[y1:y2, x1:x2]
+            region_h, region_w = region.shape[:2]
+            
+            # Chips should be roughly circular (aspect ratio close to 1:1)
+            aspect_ratio = region_w / region_h if region_h > 0 else 0
+            if not (0.7 < aspect_ratio < 1.4):  # Not circular enough
+                print(f"  [FILTER] Rejected - bad aspect ratio: {aspect_ratio:.2f}")
+                return False
+            
+            # Convert to HSV
             hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
             
-            # Check 1: Reject skin tones (dual range)
-            lower_skin1 = np.array([0, 20, 70], dtype=np.uint8)
-            upper_skin1 = np.array([20, 255, 255], dtype=np.uint8)
-            skin_mask1 = cv2.inRange(hsv, lower_skin1, upper_skin1)
+            # Reject if mostly blue/white (likely a card)
+            lower_blue = np.array([80, 30, 30])
+            upper_blue = np.array([140, 255, 255])
+            blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+            blue_ratio = np.sum(blue_mask > 0) / blue_mask.size
             
-            lower_skin2 = np.array([0, 10, 60], dtype=np.uint8)
-            upper_skin2 = np.array([25, 170, 255], dtype=np.uint8)
-            skin_mask2 = cv2.inRange(hsv, lower_skin2, upper_skin2)
+            lower_white = np.array([0, 0, 180])
+            upper_white = np.array([180, 50, 255])
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+            white_ratio = np.sum(white_mask > 0) / white_mask.size
             
-            skin_mask = cv2.bitwise_or(skin_mask1, skin_mask2)
-            skin_percentage = np.count_nonzero(skin_mask) / skin_mask.size
-            
-            # TIGHTENED: If more than 40% is skin-colored, reject
-            if skin_percentage > 0.40:
-                print(f"[COLOR CHECK] {skin_percentage*100:.1f}% skin-tone pixels detected")
+            if blue_ratio > 0.4 or white_ratio > 0.5:
+                print(f"  [FILTER] Rejected - looks like card (blue:{blue_ratio:.2f}, white:{white_ratio:.2f})")
                 return False
             
-            # Check 2: Color variance (chips should have relatively solid colors)
-            hsv_std = np.std(hsv, axis=(0, 1))
-            if hsv_std[0] > 40:  # Hue variance
-                return False
+            # Reject if mostly skin tone (likely a hand)
+            lower_skin = np.array([0, 20, 70])
+            upper_skin = np.array([20, 255, 255])
+            skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+            skin_ratio = np.sum(skin_mask > 0) / skin_mask.size
             
-            # Check 3: Brightness consistency
-            v_channel = hsv[:, :, 2]
-            v_std = np.std(v_channel)
-            if v_std > 60:
+            if skin_ratio > 0.6:
+                print(f"  [FILTER] Rejected - looks like hand (skin:{skin_ratio:.2f})")
                 return False
             
             return True
             
         except Exception as e:
-            print(f"[WARNING] Color verification failed: {e}")
+            print(f"  [FILTER] Exception in verification: {e}")
             return False
     
-    def _verify_chip_texture(self, image, bbox):
-        """Verify chip texture - chips have distinctive circular patterns/edges"""
+    def analyze_action(self, image_path):
+        """
+        Main analysis function that checks for poker actions in order:
+        1. Chips (betting/raising)
+        2. Hand tapping (checking) - CHECK HAND BEFORE FOLD
+        3. Folded cards (with confidence check)
+        
+        Returns: dict with action type and details
+        """
+        result = {
+            'action': None,
+            'details': {}
+        }
+        
+        # Step 1: Check for chips FIRST
+        chips_present, chip_labels = self.check_chips(image_path)
+        
+        if chips_present:
+            # If chips detected, analyze chip amounts
+            chip_amounts = self.check_chip_amounts(image_path)
+            result['action'] = 'BET/RAISE'
+            result['details']['chips_detected'] = chip_labels
+            result['details']['chip_amounts'] = list(chip_amounts) if chip_amounts else []
+            return result
+        
+        # Step 2: Check for hand SECOND (before fold check)
+        # This prevents hands from being detected as folded cards
+        hand_present, hand_confidence = self.check_hand_present(image_path)
+        
+        if hand_present:
+            result['action'] = 'CHECK'
+            result['details']['hand_detected'] = True
+            result['details']['hand_confidence'] = hand_confidence
+            return result
+        
+        # Step 3: Check for folded cards THIRD
+        folded_cards, fold_confidence = self.check_folded_cards(image_path)
+        
+        if folded_cards:
+            result['action'] = 'FOLD'
+            result['details']['folded_cards_detected'] = True
+            result['details']['fold_confidence'] = fold_confidence
+            return result
+        
+        # Step 4: Uncertain states
+        if hand_confidence > 0.20:
+            result['action'] = 'UNCERTAIN_CHECK'
+            result['details']['hand_confidence'] = hand_confidence
+            result['details']['message'] = f"Possible hand detected but confidence too low ({hand_confidence:.1%} < {self.check_confidence_threshold:.1%})"
+            return result
+        
+        if fold_confidence > 0.25:
+            result['action'] = 'UNCERTAIN_FOLD'
+            result['details']['fold_confidence'] = fold_confidence
+            result['details']['message'] = f"Possible fold detected but confidence too low ({fold_confidence:.1%} < {self.fold_confidence_threshold:.1%})"
+            return result
+        
+        # No action detected
+        result['action'] = 'NO_ACTION'
+        return result
+    
+    def check_folded_cards(self, image_path):
+        """IMPROVED fold detection - EXCLUDE SKIN TONES (hands)"""
         try:
-            x1, y1, x2, y2 = map(int, bbox)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
+            full_image = cv2.imread(image_path)
+            if full_image is None:
+                return False, 0.0
             
-            region = image[y1:y2, x1:x2]
+            # CROP TO TABLE REGION
+            image = self._crop_to_table_region(full_image)
             
-            if region.size == 0:
-                return False
+            img_height, img_width = image.shape[:2]
             
-            # Convert to grayscale
-            gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+            # Convert to different color spaces
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Detect edges
-            edges = cv2.Canny(gray, 50, 150)
-            edge_percentage = np.count_nonzero(edges) / edges.size
+            # CREATE SKIN MASK to exclude hands
+            lower_skin = np.array([0, 15, 50])
+            upper_skin = np.array([25, 255, 255])
+            skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             
-            # Chips typically have 5-50% edge pixels
-            if edge_percentage < 0.05 or edge_percentage > 0.50:
-                return False
+            # Dilate skin mask to be more aggressive
+            kernel_skin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+            skin_mask = cv2.dilate(skin_mask, kernel_skin, iterations=2)
             
-            # Check for circular shapes
-            circles = cv2.HoughCircles(
-                gray,
-                cv2.HOUGH_GRADIENT,
-                dp=1,
-                minDist=20,
-                param1=50,
-                param2=30,
-                minRadius=int(min(gray.shape) * 0.2),
-                maxRadius=int(max(gray.shape) * 0.6)
-            )
+            # Method 1: Blue detection BUT exclude vertical structures AND skin
+            lower_blue = np.array([70, 20, 20])
+            upper_blue = np.array([150, 255, 255])
+            blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
             
-            # If we detect circular patterns or reasonable edge percentage, accept
-            if circles is not None or (0.08 < edge_percentage < 0.35):
-                return True
+            # EXCLUDE skin regions from blue mask
+            blue_mask = cv2.bitwise_and(blue_mask, cv2.bitwise_not(skin_mask))
             
-            return False
+            # Find contours in blue mask
+            contours_blue, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Filter out vertical contours (blinds)
+            blue_mask_filtered = np.zeros_like(blue_mask)
+            for contour in contours_blue:
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / h if h > 0 else 0
+                
+                # Keep only horizontal-ish rectangles (cards), reject vertical ones (blinds)
+                if aspect_ratio > 0.3:  # Not too vertical
+                    cv2.drawContours(blue_mask_filtered, [contour], -1, 255, -1)
+            
+            blue_mask = blue_mask_filtered
+            
+            # Method 2: White/light detection (also exclude skin)
+            lower_white = np.array([0, 0, 140])
+            upper_white = np.array([180, 60, 255])
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+            
+            # EXCLUDE skin regions from white mask
+            white_mask = cv2.bitwise_and(white_mask, cv2.bitwise_not(skin_mask))
+            
+            # Combine (blue cards and white cards)
+            combined_mask = cv2.bitwise_or(blue_mask, white_mask)
+            
+            # Morphological operations
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # Find contours
+            contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            best_confidence = 0.0
+            
+            # Check for rectangular shapes
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                
+                # Cards should be 0.3-40% of CROPPED image
+                relative_area = area / (img_height * img_width)
+                if relative_area < 0.003 or relative_area > 0.40:
+                    continue
+                
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = float(w) / h if h > 0 else 0
+                
+                # REJECT VERTICAL SHAPES (blinds have aspect < 0.3)
+                if aspect_ratio < 0.3:
+                    continue
+                
+                # Playing cards: aspect ratio 0.4-2.5
+                if not (0.4 < aspect_ratio < 2.5):
+                    continue
+                
+                # Check rectangularity
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter == 0:
+                    continue
+                
+                approx = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
+                
+                # Rectangles have 4-10 corners
+                if len(approx) >= 4 and len(approx) <= 10:
+                    # Additional check: region should NOT be mostly skin-colored
+                    region_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+                    cv2.drawContours(region_mask, [contour], -1, 255, -1)
+                    
+                    # Check overlap with skin mask
+                    overlap = cv2.bitwise_and(region_mask, skin_mask)
+                    overlap_ratio = np.sum(overlap > 0) / np.sum(region_mask > 0) if np.sum(region_mask > 0) > 0 else 0
+                    
+                    # Reject if more than 30% of region is skin
+                    if overlap_ratio > 0.30:
+                        continue
+                    
+                    # Calculate confidence
+                    rectangularity_score = 1.0 if len(approx) == 4 else 0.6
+                    
+                    # Aspect ratio score
+                    target_ratio = 0.714
+                    aspect_diff = abs(aspect_ratio - target_ratio)
+                    aspect_score = max(0, 1.0 - (aspect_diff / 1.5))
+                    
+                    # Size score
+                    size_score = min(relative_area / 0.10, 1.0)
+                    
+                    confidence = (
+                        (rectangularity_score * 0.35) +
+                        (aspect_score * 0.35) +
+                        (size_score * 0.30)
+                    )
+                    
+                    best_confidence = max(best_confidence, confidence)
+            
+            print(f"[FOLD DETECTION] Confidence: {best_confidence:.2%}")
+            return best_confidence >= self.fold_confidence_threshold, best_confidence
             
         except Exception as e:
-            print(f"[WARNING] Texture verification failed: {e}")
-            return True
-    
-    def _non_maximum_suppression(self, detections, iou_threshold=0.5):
-        """Remove overlapping detections"""
-        if len(detections) == 0:
-            return []
-        
-        detections = sorted(detections, key=lambda x: x[0], reverse=True)
-        keep = []
-        
-        while len(detections) > 0:
-            best = detections[0]
-            keep.append(best)
-            detections = detections[1:]
-            
-            filtered = []
-            for det in detections:
-                iou = self._calculate_iou(best[1], det[1])
-                if iou < iou_threshold:
-                    filtered.append(det)
-            
-            detections = filtered
-        
-        return keep
-    
-    def _calculate_iou(self, box1, box2):
-        """Calculate Intersection over Union"""
-        x1_min, y1_min, x1_max, y1_max = box1
-        x2_min, y2_min, x2_max, y2_max = box2
-        
-        inter_x_min = max(x1_min, x2_min)
-        inter_y_min = max(y1_min, y2_min)
-        inter_x_max = min(x1_max, x2_max)
-        inter_y_max = min(y1_max, y2_max)
-        
-        if inter_x_max < inter_x_min or inter_y_max < inter_y_min:
-            return 0.0
-        
-        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
-        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
-        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
-        union_area = box1_area + box2_area - inter_area
-        
-        return inter_area / union_area if union_area > 0 else 0
+            print(f"[ERROR] Fold detection failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, 0.0
     
     def check_chip_amounts(self, image_path):
         """Check chip amounts in the image"""
@@ -275,86 +525,19 @@ class ActionAnalyzer:
             print(f"[ERROR] Chip amount detection failed: {e}")
             return set()
     
-    def check_folded_cards(self, image_path):
-        """Check for folded cards (blue/white rectangles or flat cards)"""
-        try:
-            image = cv2.imread(image_path)
-            if image is None:
-                return False
-            
-            img_height, img_width = image.shape[:2]
-            
-            # Convert to HSV for better color detection
-            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-            
-            # Enhanced blue detection for card backs (multiple ranges)
-            lower_blue1 = np.array([90, 50, 50])
-            upper_blue1 = np.array([130, 255, 255])
-            blue_mask1 = cv2.inRange(hsv, lower_blue1, upper_blue1)
-            
-            lower_blue2 = np.array([100, 30, 30])
-            upper_blue2 = np.array([140, 255, 200])
-            blue_mask2 = cv2.inRange(hsv, lower_blue2, upper_blue2)
-            
-            blue_mask = cv2.bitwise_or(blue_mask1, blue_mask2)
-            
-            # White range
-            lower_white = np.array([0, 0, 180])
-            upper_white = np.array([180, 40, 255])
-            white_mask = cv2.inRange(hsv, lower_white, upper_white)
-            
-            # Combine masks
-            combined_mask = cv2.bitwise_or(blue_mask, white_mask)
-            
-            # Morphological operations
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-            
-            # Find contours
-            contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # Check for rectangular shapes (folded cards)
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                
-                # Cards should be 1-30% of image
-                relative_area = area / (img_height * img_width)
-                if relative_area < 0.01 or relative_area > 0.30:
-                    continue
-                
-                # Get bounding rectangle
-                x, y, w, h = cv2.boundingRect(contour)
-                aspect_ratio = float(w) / h if h > 0 else 0
-                
-                # Playing cards: aspect ratio 0.5-1.5 (allows some rotation)
-                if not (0.5 < aspect_ratio < 1.5):
-                    continue
-                
-                # Check rectangularity
-                perimeter = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-                
-                # Rectangles have 4 corners (allow 4-6 for some imperfection)
-                if len(approx) >= 4 and len(approx) <= 6:
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            print(f"[ERROR] Fold detection failed: {e}")
-            return False
-    
     def check_hand_present(self, image_path):
-        """Check if a hand is present using MediaPipe or simple skin detection"""
+        """Check if a hand is present using MediaPipe with confidence score"""
         if not MEDIAPIPE_AVAILABLE or self.hands is None:
             return self.check_hand_simple(image_path)
         
         try:
-            # Load image
-            image = cv2.imread(image_path)
-            if image is None:
-                return False
+            # Load and crop image
+            full_image = cv2.imread(image_path)
+            if full_image is None:
+                return False, 0.0
+            
+            # CROP TO TABLE
+            image = self._crop_to_table_region(full_image)
             
             # Convert BGR to RGB
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -364,55 +547,40 @@ class ActionAnalyzer:
             
             # Check if hands are detected
             if results.multi_hand_landmarks:
-                # Additional verification: check if hand landmarks are reasonable
-                for hand_landmarks in results.multi_hand_landmarks:
-                    if len(hand_landmarks.landmark) == 21:
-                        if self._verify_hand_landmarks(hand_landmarks, image.shape):
-                            return True
-                return True  # If landmarks exist but verification failed, still possible
+                best_confidence = 0.0
+                
+                # Get confidence scores from each hand
+                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    if self._verify_hand_landmarks(hand_landmarks, image.shape):
+                        # If we have multi_handedness, use that confidence
+                        if hasattr(results, 'multi_handedness') and results.multi_handedness:
+                            if idx < len(results.multi_handedness):
+                                hand_confidence = results.multi_handedness[idx].classification[0].score
+                                best_confidence = max(best_confidence, hand_confidence)
+                            else:
+                                best_confidence = max(best_confidence, 0.80)  # High confidence
+                        else:
+                            best_confidence = max(best_confidence, 0.80)  # Landmarks exist
+                
+                print(f"[HAND DETECTION] MediaPipe confidence: {best_confidence:.2%}")
+                return best_confidence >= self.check_confidence_threshold, best_confidence
             
-            return False
+            print(f"[HAND DETECTION] No hand detected by MediaPipe")
+            return False, 0.0
+            
         except Exception as e:
             print(f"[WARNING] MediaPipe hand detection failed: {e}")
             return self.check_hand_simple(image_path)
     
-    def _verify_hand_landmarks(self, hand_landmarks, img_shape):
-        """Verify that hand landmarks are in reasonable positions"""
-        try:
-            img_height, img_width = img_shape[:2]
-            
-            # Get key landmarks
-            wrist = hand_landmarks.landmark[0]
-            middle_tip = hand_landmarks.landmark[12]
-            
-            # Convert to pixel coordinates
-            wrist_pos = (wrist.x * img_width, wrist.y * img_height)
-            middle_pos = (middle_tip.x * img_width, middle_tip.y * img_height)
-            
-            # Calculate hand length
-            hand_length = np.sqrt(
-                (middle_pos[0] - wrist_pos[0])**2 + 
-                (middle_pos[1] - wrist_pos[1])**2
-            )
-            
-            # Hand should be 5-50% of image diagonal
-            img_diagonal = np.sqrt(img_width**2 + img_height**2)
-            relative_size = hand_length / img_diagonal
-            
-            if relative_size < 0.05 or relative_size > 0.50:
-                return False
-            
-            return True
-            
-        except Exception as e:
-            return True
-    
     def check_hand_simple(self, image_path):
-        """Simple hand detection using skin color detection"""
+        """Simple hand detection - CROP TO TABLE FIRST"""
         try:
-            image = cv2.imread(image_path)
-            if image is None:
-                return False
+            full_image = cv2.imread(image_path)
+            if full_image is None:
+                return False, 0.0
+            
+            # CROP TO TABLE
+            image = self._crop_to_table_region(full_image)
             
             img_height, img_width = image.shape[:2]
             img_area = img_height * img_width
@@ -420,86 +588,104 @@ class ActionAnalyzer:
             # Convert to HSV
             hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             
-            # Define skin color range in HSV
-            lower_skin = np.array([0, 20, 70], dtype=np.uint8)
-            upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+            # Define skin color range in HSV (BROADER RANGE)
+            lower_skin = np.array([0, 15, 50], dtype=np.uint8)
+            upper_skin = np.array([25, 255, 255], dtype=np.uint8)
             
             # Create mask for skin color
             skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
             
             # Apply morphological operations to clean up
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+            skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
             skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel)
             
             # Find contours
             contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            best_confidence = 0.0
             
             # Check if any significant skin-colored region exists
             for contour in contours:
                 area = cv2.contourArea(contour)
                 relative_area = area / img_area
                 
-                # Hand should be 2-40% of image
-                if 0.02 < relative_area < 0.40:
+                # Hand should be 1-50% of image (MORE LENIENT)
+                if 0.01 < relative_area < 0.50:
                     # Additional check: hand-like shape
                     perimeter = cv2.arcLength(contour, True)
                     circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
                     
-                    # Hands are not too circular (0.15-0.75)
-                    if 0.15 < circularity < 0.75:
-                        return True
+                    # Hands are not too circular (0.1-0.8) - MORE LENIENT
+                    if 0.1 < circularity < 0.8:
+                        # Calculate confidence
+                        size_score = min(relative_area / 0.15, 1.0)  # Optimal at 15%
+                        shape_score = max(0, 1.0 - abs(circularity - 0.40) / 0.60)  # More lenient
+                        
+                        confidence = (size_score * 0.5) + (shape_score * 0.5)
+                        best_confidence = max(best_confidence, confidence)
             
-            return False
+            print(f"[HAND DETECTION] Simple method confidence: {best_confidence:.2%}")
+            return best_confidence >= self.check_confidence_threshold, best_confidence
             
         except Exception as e:
             print(f"[ERROR] Simple hand detection failed: {e}")
-            return False
+            return False, 0.0
     
-    def analyze_action(self, image_path):
-        """
-        Main analysis function that checks for poker actions in order:
-        1. Chips (betting/raising)
-        2. Folded cards
-        3. Hand tapping (checking)
+    def _non_maximum_suppression(self, detections, iou_threshold=0.4):
+        """Apply Non-Maximum Suppression to remove duplicate detections"""
+        if len(detections) == 0:
+            return []
         
-        Returns: dict with action type and details
-        """
-        result = {
-            'action': None,
-            'details': {}
-        }
+        # Sort by confidence (highest first)
+        detections = sorted(detections, key=lambda x: x[0], reverse=True)
         
-        # Step 1: Check for chips
-        chips_present, chip_labels = self.check_chips(image_path)
+        keep = []
         
-        if chips_present:
-            # If chips detected, analyze chip amounts
-            chip_amounts = self.check_chip_amounts(image_path)
-            result['action'] = 'BET/RAISE'
-            result['details']['chips_detected'] = chip_labels
-            result['details']['chip_amounts'] = list(chip_amounts) if chip_amounts else []
-            return result
+        while len(detections) > 0:
+            # Take the detection with highest confidence
+            best = detections[0]
+            keep.append(best)
+            detections = detections[1:]
+            
+            # Remove all detections that overlap significantly with best
+            filtered = []
+            for det in detections:
+                iou = self._calculate_iou(best[2], det[2])
+                if iou < iou_threshold:
+                    filtered.append(det)
+            
+            detections = filtered
         
-        # Step 2: Check for folded cards
-        folded_cards = self.check_folded_cards(image_path)
+        return keep
+    
+    def _calculate_iou(self, box1, box2):
+        """Calculate Intersection over Union (IoU) between two bounding boxes"""
+        # Get coordinates
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
         
-        if folded_cards:
-            result['action'] = 'FOLD'
-            result['details']['folded_cards_detected'] = True
-            return result
+        # Calculate intersection area
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
         
-        # Step 3: Check for hand (checking motion)
-        hand_present = self.check_hand_present(image_path)
+        inter_width = max(0, inter_x_max - inter_x_min)
+        inter_height = max(0, inter_y_max - inter_y_min)
+        inter_area = inter_width * inter_height
         
-        if hand_present:
-            result['action'] = 'CHECK'
-            result['details']['hand_detected'] = True
-            return result
+        # Calculate union area
+        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
+        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
+        union_area = box1_area + box2_area - inter_area
         
-        # No action detected
-        result['action'] = 'NO_ACTION'
-        return result
+        # Calculate IoU
+        if union_area == 0:
+            return 0
+        
+        iou = inter_area / union_area
+        return iou
     
     def __del__(self):
         """Cleanup MediaPipe resources"""
