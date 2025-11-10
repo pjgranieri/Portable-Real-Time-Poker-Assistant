@@ -59,7 +59,22 @@ class CVInputInterface:
             print(f"[INFO] Created Outputs directory: {self.outputs_dir}")
         
         print(f"[INFO] Monitoring folder: {self.outputs_dir}")
+        
+        # Grace period after processing (seconds)
+        self.grace_period = 10
+        
+        # ADD CONFIDENCE THRESHOLD
+        self.card_confidence_threshold = 0.50  # 50% for card detection
+        self.chip_confidence_threshold = 0.70  # 70% for chip detection (chips might need lower threshold)
     
+    def apply_grace_period(self):
+        """Apply a grace period delay after processing an image"""
+        print(f"\n⏸️  Grace period: Waiting {self.grace_period} seconds before next detection...")
+        for i in range(self.grace_period, 0, -1):
+            print(f"\r   {i} seconds remaining...   ", end='', flush=True)
+            time.sleep(1)
+        print("\r   ✅ Grace period complete!      ")
+
     def get_latest_image(self, timeout=60):
         """
         Wait for a new image to be uploaded and return its path
@@ -110,7 +125,8 @@ class CVInputInterface:
         CardManager expects: "AC", "KD", "10S" (VALUE+SUIT) - same format!
         ml_json_input.py will handle the conversion to SUIT+VALUE
         """
-        results = self.card_model(image_path, verbose=False)
+        # ADD CONFIDENCE THRESHOLD HERE!
+        results = self.card_model(image_path, conf=self.card_confidence_threshold, verbose=False)
         
         detected_cards_raw = []
         
@@ -119,8 +135,9 @@ class CVInputInterface:
             for box in result.boxes:  
                 class_id = int(box.cls[0])
                 card_label = result.names[class_id]  # e.g., "AC", "10S", "KH"
+                confidence = float(box.conf[0])  # Get confidence score
                 detected_cards_raw.append(card_label)
-                print(f"  [CV] Detected: {card_label}")
+                print(f"  [CV] Detected: {card_label} (confidence: {confidence:.2%})")
         
         # Remove duplicates while preserving order
         unique_cards = []
@@ -136,7 +153,8 @@ class CVInputInterface:
         Detect number of chips in image
         Returns total bet amount (chips * $5)
         """
-        results = self.chip_model(image_path, verbose=False)
+        # Use chip-specific threshold
+        results = self.chip_model(image_path, conf=self.chip_confidence_threshold, verbose=False)
         
         chip_count = 0
         for result in results:
@@ -176,6 +194,10 @@ class CVInputInterface:
                 
                 if len(cards) >= expected_count:
                     print(f"✅ Found {len(cards)} cards (need {expected_count})")
+                    
+                    # Apply grace period after successful detection
+                    self.apply_grace_period()
+                    
                     return cards[:expected_count]
                 else:
                     print(f"⚠️  Only found {len(cards)} cards, need {expected_count}")
@@ -247,13 +269,25 @@ class CVInputInterface:
                         if bet_amount > bankroll:
                             bet_amount = bankroll
                         print(f"  ✅ Action: RAISE to ${bet_amount}")
+                        
+                        # Apply grace period after successful detection
+                        self.apply_grace_period()
+                        
                         return ('raise', bet_amount)
                     elif bet_amount == call_value and call_value > 0:
                         print(f"  ✅ Action: CALL ${call_value}")
+                        
+                        # Apply grace period after successful detection
+                        self.apply_grace_period()
+                        
                         return ('call', call_value)
                     else:
                         print(f"  ⚠️  Detected ${bet_amount} but need ${call_value} to call")
                         print(f"  → Treating as partial bet, interpreting as RAISE to ${bet_amount}")
+                        
+                        # Apply grace period after successful detection
+                        self.apply_grace_period()
+                        
                         return ('raise', bet_amount)
                 
                 # PRIORITY 2: No chips - check for folded cards
@@ -266,25 +300,45 @@ class CVInputInterface:
                 
                 if action_type == 'FOLD':
                     print(f"  ✅ Action: FOLD")
+                    
+                    # Apply grace period after successful detection
+                    self.apply_grace_period()
+                    
                     return ('fold', 0)
                 
                 # PRIORITY 3: No chips, no fold - check for hand (checking)
                 if action_type == 'CHECK' or action_type == 'NO_ACTION':
                     if call_value == 0:
                         print(f"  ✅ Action: CHECK")
+                        
+                        # Apply grace period after successful detection
+                        self.apply_grace_period()
+                        
                         return ('check', 0)
                     else:
                         print(f"  ⚠️  No chips detected but call_value=${call_value}")
                         print(f"  → Cannot check when facing a bet - interpreting as FOLD")
+                        
+                        # Apply grace period after successful detection
+                        self.apply_grace_period()
+                        
                         return ('fold', 0)
                 
                 # Fallback - unclear action
                 print(f"  ⚠️  Unclear action detected: {action_type}")
                 if call_value == 0:
                     print(f"  → Defaulting to CHECK")
+                    
+                    # Apply grace period after successful detection
+                    self.apply_grace_period()
+                    
                     return ('check', 0)
                 else:
                     print(f"  → Defaulting to FOLD")
+                    
+                    # Apply grace period after successful detection
+                    self.apply_grace_period()
+                    
                     return ('fold', 0)
                     
             except TimeoutError as e:
@@ -294,7 +348,7 @@ class CVInputInterface:
                 else:
                     print("   Max attempts reached")
         
-        # Fallback - default to fold
+        # Fallback - default to fold (no grace period for fallback)
         print("\n⚠️  No valid action detected, defaulting to FOLD")
         return ('fold', 0)
     

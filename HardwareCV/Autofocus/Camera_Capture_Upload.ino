@@ -25,7 +25,8 @@ const char* apiKey = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
 #define HREF_GPIO_NUM   13
 #define PCLK_GPIO_NUM   14
 
-#define CAPTURE_INTERVAL 10000
+// REDUCE capture interval to match processing needs
+#define CAPTURE_INTERVAL 8000  // 8 seconds (was 10s)
 #define MAX_RETRIES 5
 
 int captureCount = 0;
@@ -71,7 +72,6 @@ void setupCamera() {
   config.pin_d3 = Y5_GPIO_NUM;
   config.pin_d4 = Y6_GPIO_NUM;
   config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
   config.pin_d7 = Y9_GPIO_NUM;
   config.pin_xclk = XCLK_GPIO_NUM;
   config.pin_pclk = PCLK_GPIO_NUM;
