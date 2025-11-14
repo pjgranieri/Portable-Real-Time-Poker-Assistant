@@ -1,6 +1,18 @@
 {
   "dependencies": {
     "express": "^5.1.0",
-    "sharp": "^0.34.4"
-  }
+    "sharp": "^0.34.5"
+  },
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "local_server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
 }
