@@ -285,6 +285,36 @@ app.post('/api/upload-image', validateApiKey, async (req, res) => {
   }
 });
 
+// Store latest coach action
+let latestCoachAction = {
+  action: null,
+  value: 0,
+  timestamp: null
+};
+
+// POST endpoint - set coach action
+app.post('/api/coach-action', validateApiKey, (req, res) => {
+  const { action, value } = req.body;
+  
+  latestCoachAction = {
+    action: action,
+    value: value || 0,
+    timestamp: Date.now()
+  };
+  
+  console.log(`🎯 Coach action set: ${action} ${value ? '$' + value : ''}`);
+  
+  res.json({ 
+    message: 'Coach action saved',
+    action: latestCoachAction
+  });
+});
+
+// GET endpoint - retrieve coach action
+app.get('/api/coach-action', validateApiKey, (req, res) => {
+  res.json(latestCoachAction);
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
