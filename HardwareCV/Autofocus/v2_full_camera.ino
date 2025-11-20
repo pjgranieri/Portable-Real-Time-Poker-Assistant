@@ -396,10 +396,13 @@ void loop() {
     showingAction = false;
   }
   
-  // Perform image capture/upload (don't show upload status on LCD)
+  // Display "Please Standby" if nothing is being shown
   if (!showingAction && !showingWinner) {
-    performCaptureAndUpload();
+    updateDisplay("Please Standby", "");
   }
+  
+  // Perform image capture/upload (don't show upload status on LCD)
+  performCaptureAndUpload();
   
   delay(CAPTURE_INTERVAL_MS);
   
