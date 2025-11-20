@@ -40,7 +40,7 @@ const char* apiKey = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
 #define PCLK_GPIO_NUM   14
 
 // ========== Timing Constants ==========
-#define CAPTURE_INTERVAL_MS 8000
+#define CAPTURE_INTERVAL_MS 3000
 #define MAX_CAPTURE_RETRIES 5
 #define ACTION_POLL_INTERVAL_MS 3000
 #define ACTION_DISPLAY_DURATION_MS 5000
@@ -56,6 +56,11 @@ unsigned long actionDisplayEndTime = 0;
 String activeAction = "";
 String activeValue = "";
 bool showingAction = false;
+
+// ADD WINNER STATE
+String lastWinner = "";
+unsigned long winnerDisplayEndTime = 0;
+bool showingWinner = false;
 
 // ========== LCD Display Functions ==========
 void updateDisplay(const String &topLine, const String &bottomLine) {
@@ -184,7 +189,7 @@ bool performCaptureAndUpload() {
   camera_fb_t* frameBuffer = nullptr;
   for (int attemptNum = 1; attemptNum <= MAX_CAPTURE_RETRIES; attemptNum++) {
     if (attemptNum > 1) {
-      updateDisplay("Retry capture", "Attempt " + String(attemptNum));
+      // REMOVED LCD display for retry attempts
       delay(200);
     }
     
@@ -201,7 +206,7 @@ bool performCaptureAndUpload() {
   }
   
   if (!frameBuffer) {
-    updateDisplay("Capture failed", "Bad frame");
+    // REMOVED LCD display for bad frame
     failedUploads++;
     return false;
   }
@@ -223,13 +228,13 @@ bool performCaptureAndUpload() {
 
   if (httpCode == 200 || httpCode == 201) {
     successfulUploads++;
-    float successRate = 100.0 * successfulUploads / totalCaptures;
-    updateDisplay("Upload #" + String(totalCaptures), 
-                  "Rate: " + String(successRate, 1) + "%");
+    // REMOVED upload success LCD display - keep it in Serial only
+    Serial.printf("Upload #%d OK (rate: %.1f%%)\n", totalCaptures, 100.0 * successfulUploads / totalCaptures);
     return true;
   }
   
-  updateDisplay("Upload failed", "HTTP " + String(httpCode));
+  // REMOVED upload failed LCD display
+  Serial.printf("Upload failed: HTTP %d\n", httpCode);
   failedUploads++;
   return false;
 }
@@ -255,7 +260,9 @@ void pollCoachAction() {
     
     int valueKeyPos = jsonResponse.indexOf("\"value\":") + 8;
     int valueEndPos = jsonResponse.indexOf(",", valueKeyPos);
+    if (valueEndPos < 0) valueEndPos = jsonResponse.indexOf("}", valueKeyPos);
     String newValue = jsonResponse.substring(valueKeyPos, valueEndPos);
+    newValue.trim();
     
     // Display if action changed
     if (newAction != activeAction && newAction != "null" && newAction.length() > 0) {
@@ -279,6 +286,65 @@ void pollCoachAction() {
       Serial.println("====================\n");
       
       updateDisplay(line1, line2);
+    }
+  }
+  
+  httpClient.end();
+}
+
+// Poll for winner
+void pollWinner() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  HTTPClient httpClient;
+  httpClient.begin("http://20.246.97.176:3000/api/winner");
+  httpClient.setTimeout(5000);
+  httpClient.addHeader("X-API-Key", apiKey);
+  
+  int httpCode = httpClient.GET();
+  
+  if (httpCode == 200) {
+    String jsonResponse = httpClient.getString();
+    
+    // CHECK IF needsDisplay FLAG IS TRUE
+    int needsDisplayPos = jsonResponse.indexOf("\"needsDisplay\":");
+    if (needsDisplayPos > 0) {
+      int boolStartPos = needsDisplayPos + 15;
+      String needsDisplayValue = jsonResponse.substring(boolStartPos, boolStartPos + 4);
+      
+      // ONLY PROCESS IF needsDisplay IS TRUE
+      if (needsDisplayValue == "true") {
+        // Parse winner from JSON
+        int winnerKeyPos = jsonResponse.indexOf("\"winner\":\"") + 10;
+        int winnerEndPos = jsonResponse.indexOf("\"", winnerKeyPos);
+        String newWinner = jsonResponse.substring(winnerKeyPos, winnerEndPos);
+        
+        int amountKeyPos = jsonResponse.indexOf("\"amount\":") + 9;
+        int amountEndPos = jsonResponse.indexOf(",", amountKeyPos);
+        if (amountEndPos < 0) amountEndPos = jsonResponse.indexOf("}", amountKeyPos);
+        String winAmount = jsonResponse.substring(amountKeyPos, amountEndPos);
+        winAmount.trim();
+        
+        // Display winner (needsDisplay ensures this is new)
+        if (newWinner.length() > 0 && newWinner != "null") {
+          lastWinner = newWinner;
+          showingWinner = true;
+          winnerDisplayEndTime = millis() + 8000; // Show for 8 seconds
+          
+          Serial.println("\n=== WINNER ===");
+          Serial.print("Winner: ");
+          Serial.println(newWinner);
+          Serial.print("Amount: $");
+          Serial.println(winAmount);
+          Serial.println("==============\n");
+          
+          // Display on LCD
+          String line1 = newWinner;
+          String line2 = "wins $" + winAmount;
+          
+          updateDisplay(line1, line2);
+        }
+      }
     }
   }
   
@@ -319,21 +385,28 @@ void setup() {
 void loop() {
   unsigned long currentTime = millis();
   
+  // Check if winner display time expired
+  if (showingWinner && currentTime >= winnerDisplayEndTime) {
+    showingWinner = false;
+    lastWinner = ""; // Reset so same winner can be shown again next hand
+  }
+  
   // Check if action display time expired
   if (showingAction && currentTime >= actionDisplayEndTime) {
     showingAction = false;
   }
   
-  // Perform image capture/upload
-  if (!showingAction) {
+  // Perform image capture/upload (don't show upload status on LCD)
+  if (!showingAction && !showingWinner) {
     performCaptureAndUpload();
   }
   
   delay(CAPTURE_INTERVAL_MS);
   
-  // Poll for coach actions
+  // Poll for coach actions (every 3 seconds)
   if (currentTime - lastActionPollTime >= ACTION_POLL_INTERVAL_MS) {
     lastActionPollTime = currentTime;
     pollCoachAction();
+    pollWinner(); // Winner polling happens at same interval, but only displays when needsDisplay=true
   }
 }

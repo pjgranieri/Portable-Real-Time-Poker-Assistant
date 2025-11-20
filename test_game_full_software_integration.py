@@ -399,6 +399,42 @@ class TestGameIntegration:
         except Exception as e:
             print(f"  ⚠️  Failed to send action to server: {e}")
     
+    def post_winner_to_server(self, winner_name, amount):
+        """Post winner to server for ESP32 to display"""
+        try:
+            response = requests.post(
+                'http://20.246.97.176:3000/api/winner',
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g'
+                },
+                json={
+                    'winner': winner_name,
+                    'amount': amount
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"  ✅ Winner sent to server: {winner_name} wins ${amount}")
+        except Exception as e:
+            print(f"  ⚠️  Failed to send winner to server: {e}")
+    
+    def reset_game_on_server(self):
+        """Reset game state on server (clears winner flag)"""
+        try:
+            response = requests.post(
+                'http://20.246.97.176:3000/api/reset-game',
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g'
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"  ✅ Game state reset on server")
+        except Exception as e:
+            print(f"  ⚠️  Failed to reset game on server: {e}")
+    
     def mock_get_action(self, player_enum, crop_region, call_value, min_raise_total=None):
         """Get player action with server posting for coach"""
         player_data = self.players.get(player_enum)
@@ -530,6 +566,10 @@ class TestGameIntegration:
             print(f"\n{'='*60}")
             print(f" {winner.name} wins ${self.community_pot} (all others folded)")
             print(f"{'='*60}")
+            
+            # POST WINNER TO SERVER
+            self.post_winner_to_server(winner.name, self.community_pot)
+            
             self.print_bankrolls()
             return True
         return False
@@ -584,6 +624,9 @@ class TestGameIntegration:
     def wait_for_game_start(self):
         """Wait for game start"""
         self.input_interface.wait_for_game_start(self.ml_generator.hand_id + 1)
+        
+        # Reset server state (clears winner needsDisplay flag)
+        self.reset_game_on_server()
         
         # Initialize/reset all values
         self.players.initialize_bankrolls()
@@ -736,6 +779,9 @@ class TestGameIntegration:
         print(f"\n{'='*60}")
         print(f"{winner.name} wins ${self.community_pot}!")
         print(f"{'='*60}")
+        
+        # POST WINNER TO SERVER
+        self.post_winner_to_server(winner.name, self.community_pot)
         
         self.print_bankrolls()
         self.state = GameState.WAIT_FOR_GAME_START
