@@ -10,6 +10,7 @@ import sys
 import os
 import time
 import glob
+import requests
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -378,18 +379,69 @@ class TestGameIntegration:
         self.players.evaluate_with_ml = self.mock_evaluate_with_ml
         self.players.read_showdown_hands = self.mock_read_showdown_hands
         
+    def post_coach_action_to_server(self, action, value):
+        """Post coach's action to server for ESP32 to display"""
+        try:
+            response = requests.post(
+                'http://20.246.97.176:3000/api/coach-action',
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g'
+                },
+                json={
+                    'action': action,
+                    'value': value
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"  ✅ Coach action sent to server: {action} ${value if value > 0 else ''}")
+        except Exception as e:
+            print(f"  ⚠️  Failed to send action to server: {e}")
+    
+    def post_winner_to_server(self, winner_name, amount):
+        """Post winner to server for ESP32 to display"""
+        try:
+            response = requests.post(
+                'http://20.246.97.176:3000/api/winner',
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g'
+                },
+                json={
+                    'winner': winner_name,
+                    'amount': amount
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"  ✅ Winner sent to server: {winner_name} wins ${amount}")
+        except Exception as e:
+            print(f"  ⚠️  Failed to send winner to server: {e}")
+    
+    def reset_game_on_server(self):
+        """Reset game state on server (clears winner flag)"""
+        try:
+            response = requests.post(
+                'http://20.246.97.176:3000/api/reset-game',
+                headers={
+                    'Content-Type': 'application/json',
+                    'X-API-Key': 'ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g'
+                },
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"  ✅ Game state reset on server")
+        except Exception as e:
+            print(f"  ⚠️  Failed to reset game on server: {e}")
+    
     def mock_get_action(self, player_enum, crop_region, call_value, min_raise_total=None):
-        """
-        Get player action:
-        - PlayerCoach: Use ML model (if enabled), otherwise manual
-        - Others: Use CV action detection
-        """
+        """Get player action with server posting for coach"""
         player_data = self.players.get(player_enum)
         
         # If this is the coach and ML is enabled, use ML model
         if player_enum == Player.PlayerCoach and ML_ENABLED:
             try:
-                # Generate JSON for ML model
                 json_payload = self.ml_generator.generate_json_for_coach_action(
                     game_state=self.state,
                     cards=self.cards,
@@ -398,30 +450,33 @@ class TestGameIntegration:
                     call_value=call_value
                 )
                 
-                # Get ML prediction
                 action, value = ml_get_action(json_payload)
+                
+                # POST ACTION TO SERVER FOR ESP32
+                self.post_coach_action_to_server(action, value)
+                
                 return (action, value)
             except Exception as e:
                 print(f"[ERROR] ML model failed: {e}")
                 print("[INFO] Falling back to manual input for coach")
-                # Fall through to manual input
         
         if player_enum == Player.PlayerCoach:
-            # Use manual input for coach
+            # Manual input for coach
             print(f"\n{'='*60}")
             print(f"{player_enum.name}'s Turn (Manual Input)")
             print(f"  Bankroll: ${player_data['bankroll']}")
             print(f"  Call value: ${call_value}")
             print(f"{'='*60}")
             
-            # Get manual action - ONLY fold, check, call, raise
             while True:
                 action = input(f"Action (fold/check/call/raise): ").strip().lower()
                 
                 if action == 'fold':
+                    self.post_coach_action_to_server('fold', 0)
                     return ('fold', 0)
                 elif action == 'check':
                     if call_value == 0:
+                        self.post_coach_action_to_server('check', 0)
                         return ('check', 0)
                     else:
                         print(f"Cannot check - must call ${call_value}")
@@ -430,12 +485,12 @@ class TestGameIntegration:
                     if call_value == 0:
                         print("Nothing to call - use 'check' instead")
                         continue
+                    self.post_coach_action_to_server('call', call_value)
                     return ('call', call_value)
                 elif action == 'raise':
                     try:
                         amount = int(input(f"Raise to (total): $"))
                         
-                        # Calculate minimum raise
                         if call_value == 0:
                             min_raise = 5
                         else:
@@ -447,6 +502,8 @@ class TestGameIntegration:
                         if amount > player_data['bankroll']:
                             print(f"Cannot raise to ${amount} - only have ${player_data['bankroll']}")
                             continue
+                        
+                        self.post_coach_action_to_server('raise', amount)
                         return ('raise', amount)
                     except ValueError:
                         print("Invalid amount")
@@ -455,7 +512,7 @@ class TestGameIntegration:
                     print("Invalid action. Use: fold, check, call, or raise")
                     continue
         
-        # Otherwise use CV for opponent
+        # CV for opponent
         return self.cv_interface.get_opponent_action(
             player_enum.name,
             call_value,
@@ -509,6 +566,10 @@ class TestGameIntegration:
             print(f"\n{'='*60}")
             print(f" {winner.name} wins ${self.community_pot} (all others folded)")
             print(f"{'='*60}")
+            
+            # POST WINNER TO SERVER
+            self.post_winner_to_server(winner.name, self.community_pot)
+            
             self.print_bankrolls()
             return True
         return False
@@ -563,6 +624,9 @@ class TestGameIntegration:
     def wait_for_game_start(self):
         """Wait for game start"""
         self.input_interface.wait_for_game_start(self.ml_generator.hand_id + 1)
+        
+        # Reset server state (clears winner needsDisplay flag)
+        self.reset_game_on_server()
         
         # Initialize/reset all values
         self.players.initialize_bankrolls()
@@ -715,6 +779,9 @@ class TestGameIntegration:
         print(f"\n{'='*60}")
         print(f"{winner.name} wins ${self.community_pot}!")
         print(f"{'='*60}")
+        
+        # POST WINNER TO SERVER
+        self.post_winner_to_server(winner.name, self.community_pot)
         
         self.print_bankrolls()
         self.state = GameState.WAIT_FOR_GAME_START

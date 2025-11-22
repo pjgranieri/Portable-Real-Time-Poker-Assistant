@@ -285,6 +285,93 @@ app.post('/api/upload-image', validateApiKey, async (req, res) => {
   }
 });
 
+// Store latest coach action
+let latestCoachAction = {
+  action: null,
+  value: 0,
+  timestamp: null
+};
+
+// POST endpoint - set coach action
+app.post('/api/coach-action', validateApiKey, (req, res) => {
+  const { action, value } = req.body;
+  
+  latestCoachAction = {
+    action: action,
+    value: value || 0,
+    timestamp: Date.now()
+  };
+  
+  console.log(`🎯 Coach action set: ${action} ${value ? '$' + value : ''}`);
+  
+  res.json({ 
+    message: 'Coach action saved',
+    action: latestCoachAction
+  });
+});
+
+// GET endpoint - retrieve coach action
+app.get('/api/coach-action', validateApiKey, (req, res) => {
+  res.json(latestCoachAction);
+});
+
+// Store latest winner
+let latestWinner = {
+  winner: null,
+  amount: 0,
+  timestamp: null,
+  needsDisplay: false  // ADD THIS FLAG
+};
+
+// POST endpoint - set winner
+app.post('/api/winner', validateApiKey, (req, res) => {
+  const { winner, amount } = req.body;
+  
+  latestWinner = {
+    winner: winner,
+    amount: amount || 0,
+    timestamp: Date.now(),
+    needsDisplay: true  // SET FLAG WHEN WINNER IS POSTED
+  };
+  
+  console.log(`🏆 Winner set: ${winner} wins $${amount}`);
+  
+  res.json({ 
+    message: 'Winner saved',
+    winner: latestWinner
+  });
+});
+
+// GET endpoint - retrieve winner
+app.get('/api/winner', validateApiKey, (req, res) => {
+  const responseData = { ...latestWinner };
+  
+  // CLEAR THE FLAG AFTER RETRIEVAL
+  if (latestWinner.needsDisplay) {
+    latestWinner.needsDisplay = false;
+    console.log(`📺 Winner displayed: ${latestWinner.winner}`);
+  }
+  
+  res.json(responseData);
+});
+
+// POST endpoint - reset game state (clear winner)
+app.post('/api/reset-game', validateApiKey, (req, res) => {
+  latestWinner = {
+    winner: null,
+    amount: 0,
+    timestamp: null,
+    needsDisplay: false
+  };
+  
+  console.log('🔄 Game reset - winner cleared');
+  
+  res.json({ 
+    message: 'Game state reset',
+    winner: latestWinner
+  });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
@@ -302,6 +389,11 @@ http.createServer(app).listen(3000, '0.0.0.0', () => {
   console.log('  POST /api/upload-image - Upload camera images (base64 JSON - legacy)');
   console.log('  POST /api/set-crop-mode - Set cropping mode');
   console.log('  GET  /api/get-crop-mode - Get current cropping mode');
+  console.log('  POST /api/coach-action - Set coach action');
+  console.log('  GET  /api/coach-action - Get coach action');
+  console.log('  POST /api/winner - Set hand winner');
+  console.log('  GET  /api/winner - Get hand winner');
+  console.log('  POST /api/reset-game - Reset game state');
   console.log('  GET  /api/health - Health check');
   console.log(`Images will be saved to: ${uploadsDir}`);
   console.log('\n🔧 Default crop mode:', croppingMode);
