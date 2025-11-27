@@ -159,6 +159,7 @@ class TestGameOrchestrator:
 
         # Initialize/reset all values
         self.players.initialize_bankrolls()
+        self.cards.reset()  # Reset hole cards and community cards
         self.community_pot = 0
         self.call_value = 0
 

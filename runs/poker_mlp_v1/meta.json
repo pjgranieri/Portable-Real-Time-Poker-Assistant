@@ -15,8 +15,13 @@
     "has_straight_draw",
     "has_combo_draw",
     "is_missed_draw_river",
+    "num_active_players",
+    "num_players_to_act",
+    "multiway_pot_flag",
+    "position_relative",
+    "num_raisers_this_street",
+    "avg_opp_stack_bb",
     "board_texture_dry",
-    "board_texture_nan",
     "board_texture_wet",
     "pot_type_3bet",
     "pot_type_4bet",
@@ -27,7 +32,6 @@
   ],
   "binary_cols": [
     "board_texture_dry",
-    "board_texture_nan",
     "board_texture_wet",
     "pot_type_3bet",
     "pot_type_4bet",
@@ -45,8 +49,7 @@
   "pos_vocab": [
     "Early",
     "Late",
-    "Blinds",
-    "Unknown"
+    "Blinds"
   ],
   "classes": [
     "fold",
@@ -54,11 +57,11 @@
     "call",
     "raise"
   ],
-  "static_dim": 372,
+  "static_dim": 371,
   "card_dim": 364,
-  "numeric_dim": 24,
-  "n_scaled_cols": 15,
-  "temperature": 0.6398467421531677,
+  "numeric_dim": 29,
+  "n_scaled_cols": 21,
+  "temperature": 1.0667117834091187,
   "policy": {
     "fold_thresh": 0.0,
     "fold_margin": 0.0,

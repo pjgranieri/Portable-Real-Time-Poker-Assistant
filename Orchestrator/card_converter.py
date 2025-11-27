@@ -140,3 +140,31 @@ def convert_card(card):
 def validate_card(card):
     """Validate card"""
     return CardConverter.validate_card(card)
+
+def pypoker_to_internal(card_str):
+    """
+    Convert PyPokerEngine card format to internal format.
+    PyPokerEngine uses format like: 'HA', 'D2', 'SK', 'CT'
+    Internal format is same: 'HA', 'D2', 'SK', 'CT'
+    
+    Args:
+        card_str: Card string from PyPokerEngine (e.g., 'HA', 'D2')
+    
+    Returns:
+        Card string in internal format
+    """
+    if not card_str or len(card_str) != 2:
+        return ""
+    
+    # PyPokerEngine already uses SUIT+RANK format, which matches internal
+    # Just need to validate and return
+    suit = card_str[0].upper()
+    rank = card_str[1].upper()
+    
+    # Validate
+    if suit not in ['C', 'D', 'H', 'S']:
+        return ""
+    if rank not in ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']:
+        return ""
+    
+    return suit + rank

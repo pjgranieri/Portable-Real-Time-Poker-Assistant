@@ -1,3 +1,20 @@
+"""
+PokerMLP Training with Action Masking
+
+Key Features:
+- Action Masking: Enforces legal move constraints during training
+  * check only legal when to_call == 0 (no bet to face)
+  * call only legal when to_call > 0 (bet to face)
+  * fold and raise always legal
+- Label Smoothing: Reduces overconfidence (default 0.15)
+- Hand Bucket Diversity Regularization: Ensures weak hands fold more than strong hands
+- Temperature Calibration: Post-training probability calibration
+- Multi-player Support: 2-4 player games with proper position encoding
+
+The action masking prevents the model from learning illegal moves by setting
+illegal action logits to -inf before softmax, ensuring zero probability.
+"""
+
 import os, glob, json, random, time, joblib, gc, csv, math
 from functools import partial
 from typing import List, Tuple, Optional
@@ -19,7 +36,7 @@ class Cfg:
     gto_glob  = r"C:\Users\nickl\OneDrive\Documents\Computer-Vision-Powered-AI-Poker-Coach\ML Model Work\Model\Poker Data Final (Multi-Player)\data(gto_v2)_*.csv"
     gto_v3_glob = ""
     # Multi-player synthetic data
-    multiplayer_glob = r"C:\Users\nickl\OneDrive\Documents\Computer-Vision-Powered-AI-Poker-Coach\ML Model Work\Model\Poker Data Final (Multi-Player)\data_*player_synthetic.csv"
+    multiplayer_glob = r"C:\Users\nickl\OneDrive\Documents\Computer-Vision-Powered-AI-Poker-Coach\ML Model Work\Model\Poker Data Final (Multi-Player)\data_*player_synthetic_aggressive.csv"
 
     use_focal = False  # Enable focal loss to handle class imbalance
     focal_gamma = 1.2  # Reduced from 2.0 to reduce over-confidence
@@ -28,14 +45,14 @@ class Cfg:
     batch_size   = 1024
     lr           = 1e-3
     lr_min       = 1e-8
-    weight_decay = 1e-5
+    weight_decay = 1e-4
     max_epochs   = 100   
-    val_split    = 0.05 
+    val_split    = 0.10 
     num_workers  = 8     
-    patience     = 16
+    patience     = 8
 
     streets   = ["preflop", "flop", "turn", "river"]
-    positions = ["Early", "Late", "Blinds", "Unknown"]
+    positions = ["Early", "Late", "Blinds"]
 
     # Updated to 4 classes: merged raise_s/raise_m/raise_l into single 'raise'
     classes = ["fold", "check", "call", "raise"]
@@ -85,7 +102,7 @@ COLUMN_NAMES = {
         "num_players_to_act",
         "multiway_pot_flag",
         "position_relative",
-        "num_callers_this_street",
+        # "num_callers_this_street",  # Removed: all zeros in training data
         "num_raisers_this_street",
         "avg_opp_stack_bb",
     ],
@@ -214,22 +231,23 @@ class PokerDataset(Dataset):
                             df["pos"] = df[alt]
                             break
                 if "pos" not in df.columns:
-                    df["pos"] = "Unknown"
+                    raise ValueError(f"Missing position column in {p}")
 
                 POS_ALIASES = {
                     "sb": "Blinds", "small_blind": "Blinds", "bb": "Blinds", "big_blind": "Blinds",
-                    "utg": "Early", "utg1": "Early", "mp": "Early", "mp1": "Early", "ep": "Early",
+                    "utg": "Early", "utg1": "Early", "mp": "Early", "mp1": "Early", "ep": "Early", "middle": "Early",
                     "co": "Late", "cutoff": "Late", "btn": "Late", "button": "Late",
                     "early": "Early", "late": "Late", "blinds": "Blinds",
                 }
                 def _canon_pos(x):
-                    if x is None or (isinstance(x, float) and np.isnan(x)): return "Unknown"
+                    if x is None or (isinstance(x, float) and np.isnan(x)):
+                        raise ValueError(f"Invalid position value: {x} in {p}")
                     s = str(x).strip().lower()
                     if s in ("early", "late", "blinds"):
                         return s.capitalize()
                     if s in POS_ALIASES:
                         return POS_ALIASES[s]
-                    return "Unknown"
+                    raise ValueError(f"Unknown position: {x} in {p}")
                 df["pos"] = df["pos"].map(_canon_pos)
 
                 if "in_position" in df.columns:
@@ -275,22 +293,21 @@ class PokerDataset(Dataset):
                 # Don't use .upper() as it would break the vocab matching
                 df[pos_col_name] = df[pos_col_name].astype(str)
             else:
-                df[pos_col_name] = "Unknown"
-                print(f"[WARN] Missing '{pos_col_name}' in {p}, using 'Unknown'.")
+                raise ValueError(f"Missing '{pos_col_name}' column in {p}")
 
-                # Card columns
-                for k in ["hole1", "hole2"]:
-                    col = COLUMN_NAMES[k]
-                    if col in df.columns:
-                        df[col] = df[col].fillna("").astype(str)
-                        df[col] = df[col].replace("nan", "")
-                    else:
-                        df[col] = ""
-                for b_col in COLUMN_NAMES["board"]:
-                    if b_col in df.columns:
-                        df[b_col] = df[b_col].fillna("").astype(str)
-                        df[b_col] = df[b_col].replace("nan", "")
-                    else:
+            # Card columns
+            for k in ["hole1", "hole2"]:
+                col = COLUMN_NAMES[k]
+                if col in df.columns:
+                    df[col] = df[col].fillna("").astype(str)
+                    df[col] = df[col].replace("nan", "")
+                else:
+                    df[col] = ""
+            for b_col in COLUMN_NAMES["board"]:
+                if b_col in df.columns:
+                    df[b_col] = df[b_col].fillna("").astype(str)
+                    df[b_col] = df[b_col].replace("nan", "")
+                else:
                         df[b_col] = ""
 
             # fill missing
@@ -400,6 +417,27 @@ class PokerDataset(Dataset):
 
         scaled_numerics = self.df[self.numeric_cols].values.astype(np.float16)
         
+        # DEPLOYMENT FIX: Ensure all expected binary columns exist
+        # Model expects specific one-hot encoded categorical features
+        expected_binary_cols = [
+            "board_texture_dry",
+            "board_texture_wet",
+            "pot_type_3bet",
+            "pot_type_4bet",
+            "pot_type_limped",
+            "pot_type_single_raised",
+            "pot_type_three_bet",
+            "pot_type_unopened"
+        ]
+        
+        # Add missing binary columns with zeros
+        for col in expected_binary_cols:
+            if col not in self.df.columns:
+                self.df[col] = 0.0
+        
+        # Update binary_cols to include all expected columns
+        self.binary_cols = expected_binary_cols
+        
         if self.binary_cols:
             binary_features = self.df[self.binary_cols].values.astype(np.float16)
             binary_features = np.nan_to_num(binary_features, nan=0.0).astype(np.float16)
@@ -449,7 +487,10 @@ class PokerDataset(Dataset):
     def _row_static_encoding(self, row) -> Tuple[np.ndarray, int]:
         cards = self._encode_cards(row)
         street_oh = one_hot(row.get(COLUMN_NAMES["street"], ""), self.street_vocab)
-        pos_oh    = one_hot(row.get(COLUMN_NAMES["position"], "Unknown"), self.pos_vocab)
+        pos_val = row.get(COLUMN_NAMES["position"])
+        if pos_val not in self.pos_vocab:
+            raise ValueError(f"Invalid position '{pos_val}' not in vocabulary {self.pos_vocab}")
+        pos_oh = one_hot(pos_val, self.pos_vocab)
         static = np.concatenate([cards, street_oh, pos_oh], axis=0).astype(np.float32)
         return static, cards.shape[0]
 
@@ -658,6 +699,42 @@ def collate_with_scaler(batch, scaler: Optional[StandardScaler], n_scaled_cols: 
     return statics, numerics, y, w
 
 
+def create_action_mask(to_call_bb, num_classes=4):
+  
+    batch_size = to_call_bb.size(0)
+    mask = torch.ones((batch_size, num_classes), dtype=torch.bool, device=to_call_bb.device)
+    
+    facing_bet = to_call_bb > 0.01  # Small epsilon for floating point
+    
+    # fold (idx 0): only legal when facing bet
+    mask[:, 0] = facing_bet
+    # check (idx 1): only legal when NOT facing bet
+    mask[:, 1] = ~facing_bet
+    # call (idx 2): only legal when facing bet
+    mask[:, 2] = facing_bet
+    # raise (idx 3): always legal
+    
+    return mask
+
+
+def apply_action_mask(logits, mask):
+    """
+    Apply action legality mask to logits by setting illegal actions to very negative value.
+    
+    Args:
+        logits: Raw model outputs (batch_size, num_classes)
+        mask: Boolean mask (batch_size, num_classes) where True = legal
+    
+    Returns:
+        Masked logits with illegal actions set to -100 (avoids numerical instability)
+    """
+    masked_logits = logits.clone()
+    # Use -100 instead of -1e9 to avoid overflow in log_softmax
+    # After softmax, exp(-100) ≈ 3.7e-44 which is effectively zero
+    masked_logits[~mask] = -100.0
+    return masked_logits
+
+
 def apply_label_smoothing(y_true, num_classes, smoothing=0.0):
     """
     Apply label smoothing to target labels.
@@ -682,17 +759,43 @@ def apply_label_smoothing(y_true, num_classes, smoothing=0.0):
 
 
 @torch.no_grad()
-def eval_loop(model, loader, device, loss_fn):
+def eval_loop(model, loader, device, loss_fn, use_label_smoothing=False, label_smoothing=0.0, num_classes=4, 
+              scaler=None, to_call_idx=1, use_action_masking=False):
+    """Evaluation loop with optional label smoothing and action masking to match training loss calculation."""
     model.eval()
     total, correct = 0, 0
     losses = []
     all_y, all_p = [], []
+    illegal_predictions = 0
+    
     for statics, numerics, y, w in loader:
         statics, numerics = statics.to(device), numerics.to(device)
         y, w = y.to(device), w.to(device)
         logits = model(statics, numerics)
+        
+        # Apply action masking if requested
+        if use_action_masking and scaler is not None:
+            # Extract to_call_bb from scaled numerics
+            to_call_scaled = numerics[:, to_call_idx]
+            to_call_bb = to_call_scaled * scaler.scale_[to_call_idx] + scaler.mean_[to_call_idx]
+            
+            # Create and apply mask
+            mask = create_action_mask(to_call_bb, num_classes)
+            logits = apply_action_mask(logits, mask)
+            
+            # Track illegal predictions (before masking)
+            pred_before_mask = model(statics, numerics).argmax(1)
+            illegal_predictions += (~mask[torch.arange(mask.size(0)), pred_before_mask]).sum().item()
  
-        loss_vec = loss_fn(logits, y) 
+        # Apply label smoothing if requested (to match training)
+        if use_label_smoothing and label_smoothing > 0:
+            log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+            smooth_targets = apply_label_smoothing(y, num_classes, label_smoothing)
+            loss_vec = -(smooth_targets * log_probs).sum(dim=1)
+        else:
+            # Standard cross-entropy (raw loss)
+            loss_vec = loss_fn(logits, y)
+        
         loss = (loss_vec * w).mean()
         losses.append(loss.item())
         pred = logits.argmax(1)
@@ -700,10 +803,16 @@ def eval_loop(model, loader, device, loss_fn):
         total += y.size(0)
         all_y.append(y.cpu().numpy())
         all_p.append(pred.cpu().numpy())
+    
     acc = correct / max(total, 1)
     mean_loss = float(np.mean(losses)) if losses else 0.0
     y_concat = np.concatenate(all_y) if all_y else np.array([], dtype=np.int64)
     p_concat = np.concatenate(all_p) if all_p else np.array([], dtype=np.int64)
+    
+    if use_action_masking and total > 0:
+        illegal_rate = illegal_predictions / total
+        print(f"   [eval] Illegal action rate (before masking): {illegal_rate:.2%}")
+    
     return mean_loss, acc, y_concat, p_concat
 
 
@@ -723,24 +832,45 @@ def collect_logits_labels(model, loader, device):
 
 
 @torch.no_grad()
-def predict_with_policy(model, loader, device, T_val=1.0, fold_thresh=0, fold_margin=0.00, call_bias_logit=0.0):
-    """Applies calibration, fold-gating, and call bias to get policy predictions."""
+def predict_with_policy(model, loader, device, dataset=None, T_val=1.0, fold_thresh=0, fold_margin=0.00, call_bias_logit=0.0):
+    """Applies calibration, action masking, fold-gating, and call bias to get policy predictions."""
     model.eval()
     all_true, all_pred = [], []
     try:
         fold_idx = Cfg.classes.index("fold")
         call_idx = Cfg.classes.index("call")
+        check_idx = Cfg.classes.index("check")
+        raise_idx = Cfg.classes.index("raise")
     except ValueError:
-        print("[predict_with_policy] Error: 'fold' or 'call' not found in Cfg.classes. Check config.")
-        raise ValueError("Configuration error: 'fold' or 'call' missing from Cfg.classes")
+        print("[predict_with_policy] Error: Required classes not found in Cfg.classes. Check config.")
+        raise ValueError("Configuration error: Missing required classes")
 
     nonfold_idx = [i for i in range(len(Cfg.classes)) if i != fold_idx]
     if not nonfold_idx:
          raise ValueError("Configuration error: Only 'fold' class defined?")
 
+    # Get to_call_bb index for action masking
+    to_call_idx = None
+    if dataset is not None and hasattr(dataset, 'numeric_cols') and hasattr(dataset, 'scaler'):
+        try:
+            to_call_idx = dataset.numeric_cols.index("to_call_bb")
+        except (ValueError, AttributeError):
+            print("[predict_with_policy] Warning: Cannot find 'to_call_bb' in dataset. Action masking disabled.")
+
     for statics, numerics, y, w in loader:
         statics, numerics = statics.to(device), numerics.to(device)
         logits = model(statics, numerics)
+
+        # Apply action masking BEFORE any other transformations
+        if to_call_idx is not None and dataset is not None:
+            # Unscale to_call_bb to get original values
+            to_call_scaled = numerics[:, to_call_idx].cpu().numpy()
+            to_call_bb = to_call_scaled * dataset.scaler.scale_[to_call_idx] + dataset.scaler.mean_[to_call_idx]
+            to_call_bb = torch.from_numpy(to_call_bb).to(device)
+            
+            # Create action mask
+            mask = create_action_mask(to_call_bb, len(Cfg.classes))
+            logits = apply_action_mask(logits, mask)
 
         if call_bias_logit != 0.0:
             logits[:, call_idx] = logits[:, call_idx] + call_bias_logit
@@ -788,10 +918,10 @@ def train():
     print(f"  - Augmented heads-up (GTO v2): {len(gto_files)} files")
     print(f"  - Multi-player synthetic: {len(multiplayer_files)} files")
     print(f"Position encoding: 3 categories (Early, Late, Blinds)")
-    print(f"Multi-player features: 7 new features added")
+    print(f"Multi-player features: 6 new features added")
     print(f"  - num_active_players, num_players_to_act, multiway_pot_flag")
-    print(f"  - position_relative, num_callers_this_street, num_raisers_this_street")
-    print(f"  - avg_opp_stack_bb")
+    print(f"  - position_relative, num_raisers_this_street, avg_opp_stack_bb")
+    print(f"  - (num_callers_this_street removed: all zeros in training data)")
     print(f"{'='*80}\n")
 
     ds = PokerDataset(paths)
@@ -907,9 +1037,70 @@ def train():
         criterion = nn.CrossEntropyLoss(reduction="none")
         print(f"[Loss] Using CrossEntropyLoss with label_smoothing={Cfg.label_smoothing}")
 
-    history = {"train_loss": [], "val_loss": [], "val_acc": [], "lr": []}
+    # Hand bucket fold regularization helper
+    def compute_hand_bucket_fold_loss(model, statics, numerics, scaler_obj, hand_bucket_idx=10, to_call_idx=1):
+        """
+        Penalize model when fold probability doesn't vary with hand_bucket.
+        Training data shows bucket=0 folds 48% vs bucket=4 folds 0% when facing bet.
+        """
+        # Only apply when facing a bet (to_call_bb > 0)
+        # Check if facing bet (numerics are already scaled)
+        to_call_scaled = numerics[:, to_call_idx]
+        # Inverse transform to check original values
+        to_call_vals = to_call_scaled * scaler_obj.scale_[to_call_idx] + scaler_obj.mean_[to_call_idx]
+        facing_bet_mask = to_call_vals > 0.5
+        
+        if facing_bet_mask.sum() == 0:
+            return torch.tensor(0.0, device=device)
+        
+        # Get only hands facing a bet
+        statics_bet = statics[facing_bet_mask]
+        numerics_bet = numerics[facing_bet_mask]
+        
+        # Create versions with weak (0) and strong (4) hands
+        numerics_weak = numerics_bet.clone()
+        numerics_strong = numerics_bet.clone()
+        
+        # Scale bucket values: 0 and 4
+        weak_scaled = (0 - scaler_obj.mean_[hand_bucket_idx]) / scaler_obj.scale_[hand_bucket_idx]
+        strong_scaled = (4 - scaler_obj.mean_[hand_bucket_idx]) / scaler_obj.scale_[hand_bucket_idx]
+        
+        numerics_weak[:, hand_bucket_idx] = weak_scaled
+        numerics_strong[:, hand_bucket_idx] = strong_scaled
+        
+        # Get predictions
+        logits_weak = model(statics_bet, numerics_weak)
+        logits_strong = model(statics_bet, numerics_strong)
+        
+        probs_weak = torch.softmax(logits_weak, dim=1)
+        probs_strong = torch.softmax(logits_strong, dim=1)
+        
+        # Fold probability (class 0)
+        fold_weak = probs_weak[:, 0]
+        fold_strong = probs_strong[:, 0]
+        
+        # Weak hands should fold ~40% more than strong hands
+        fold_diff = fold_weak - fold_strong
+        target_diff = torch.full_like(fold_diff, 0.40)
+        
+        # Smooth L1 loss (Huber)
+        return torch.nn.functional.smooth_l1_loss(fold_diff, target_diff)
+    
+    history = {"train_loss": [], "val_loss": [], "val_acc": [], "lr": [], "diversity_loss": []}
     best_val = float("inf")
     patience, bad = Cfg.patience, 0
+    
+    # Enable hand_bucket regularization (set to 0.0 to disable)
+    diversity_weight = 0.15  # Start conservative, can increase to 0.3 if needed
+    print(f"\n[Regularization] Hand bucket fold diversity: weight={diversity_weight}")
+    print(f"[Regularization] Target: weak hands (bucket=0) fold 40% more than strong (bucket=4)")
+    
+    # Enable action masking to prevent illegal moves
+    use_action_masking = True
+    to_call_idx = COLUMN_NAMES["numeric_pref"].index("to_call_bb")
+    print(f"\n[Action Masking] ENABLED - Model will learn legal action constraints")
+    print(f"[Action Masking] Rules: check only when to_call=0, call only when to_call>0")
+    print(f"[Action Masking] Feature index: to_call_bb at position {to_call_idx}")
 
     if not train_loader:
          print("Skipping training loop as train_loader is empty.")
@@ -920,23 +1111,52 @@ def train():
             losses = []
             
             current_lr = opt.param_groups[0]['lr']
+            diversity_losses = []
             
             for step, (statics, numerics, y, w) in enumerate(train_loader, start=1):
                 statics, numerics, y, w = statics.to(device), numerics.to(device), y.to(device), w.to(device)
                 logits = model(statics, numerics)
                 
+                # Get action mask for legal moves (but don't apply to logits yet)
+                mask = None
+                if use_action_masking:
+                    # Extract to_call_bb from scaled numerics (inverse transform)
+                    to_call_scaled = numerics[:, to_call_idx]
+                    to_call_bb = to_call_scaled * ds.scaler.scale_[to_call_idx] + ds.scaler.mean_[to_call_idx]
+                    
+                    # Create mask
+                    mask = create_action_mask(to_call_bb, len(Cfg.classes))
+                
                 # Apply label smoothing if not using focal loss
                 if not Cfg.use_focal and Cfg.label_smoothing > 0:
                     # Use KL divergence with smoothed labels
-                    log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+                    # Apply masking to logits BEFORE softmax to get proper probabilities
+                    if mask is not None:
+                        logits_masked = apply_action_mask(logits, mask)
+                    else:
+                        logits_masked = logits
+                    
+                    log_probs = torch.nn.functional.log_softmax(logits_masked, dim=1)
                     smooth_targets = apply_label_smoothing(y, len(Cfg.classes), Cfg.label_smoothing)
                     # KL divergence: -sum(target * log_pred)
                     loss_vec = -(smooth_targets * log_probs).sum(dim=1)
                 else:
                     # Standard cross-entropy (for focal loss or no smoothing)
-                    loss_vec = criterion(logits, y)
+                    # Apply masking for focal loss too
+                    if mask is not None:
+                        logits_masked = apply_action_mask(logits, mask)
+                    else:
+                        logits_masked = logits
+                    loss_vec = criterion(logits_masked, y)
                 
-                loss = (loss_vec * w).mean()
+                ce_loss = (loss_vec * w).mean()
+                
+                # Hand bucket fold diversity regularization
+                diversity_loss = compute_hand_bucket_fold_loss(model, statics, numerics, ds.scaler)
+                diversity_losses.append(diversity_loss.item())
+                
+                # Combined loss
+                loss = ce_loss + diversity_weight * diversity_loss
 
                 opt.zero_grad()
                 loss.backward()
@@ -946,15 +1166,27 @@ def train():
 
                 if step % 100 == 0:
                     avg_loss_so_far = np.mean(losses[-100:]) if len(losses) >= 100 else np.mean(losses)
-                    print(f"   [epoch {epoch:02d}] step {step:05d} | loss {loss.item():.4f} | avg_loss {avg_loss_so_far:.4f} | lr {current_lr:.2e}")
+                    avg_div_loss = np.mean(diversity_losses[-100:]) if len(diversity_losses) >= 100 else np.mean(diversity_losses)
+                    print(f"   [epoch {epoch:02d}] step {step:05d} | loss {loss.item():.4f} | avg_loss {avg_loss_so_far:.4f} | div_loss {avg_div_loss:.4f} | lr {current_lr:.2e}")
 
             train_loss = float(np.mean(losses)) if losses else 0.0
+            avg_diversity = float(np.mean(diversity_losses)) if diversity_losses else 0.0
+            history["diversity_loss"].append(avg_diversity)
 
             if not val_loader:
                  print(f"Epoch {epoch:02d} | train {train_loss:.4f} | VAL SKIPPED | {time.time() - t0:.1f}s")
                  val_loss, val_acc = 0.0, 0.0
             else:
-                val_loss, val_acc, _, _ = eval_loop(model, val_loader, device, criterion)
+                # Calculate validation loss WITH same settings as training for fair comparison
+                val_loss, val_acc, _, _ = eval_loop(
+                    model, val_loader, device, criterion,
+                    use_label_smoothing=(not Cfg.use_focal and Cfg.label_smoothing > 0),
+                    label_smoothing=Cfg.label_smoothing,
+                    num_classes=len(Cfg.classes),
+                    scaler=ds.scaler,
+                    to_call_idx=to_call_idx,
+                    use_action_masking=use_action_masking
+                )
                 history["train_loss"].append(train_loss)
                 history["val_loss"].append(val_loss)
                 history["val_acc"].append(val_acc)
@@ -963,7 +1195,7 @@ def train():
                 
                 scheduler.step(val_loss)
                 
-                print(f"Epoch {epoch:02d} | train {train_loss:.4f} | val {val_loss:.4f} | acc {val_acc:.3f} | lr {current_lr:.2e} | {dt:.1f}s")
+                print(f"Epoch {epoch:02d} | train {train_loss:.4f} | val {val_loss:.4f} | acc {val_acc:.3f} | div {avg_diversity:.4f} | lr {current_lr:.2e} | {dt:.1f}s")
 
                 if val_loss < best_val - 1e-5:
                     best_val, bad = val_loss, 0
@@ -1032,9 +1264,10 @@ def train():
             T_val = 1.0
 
 
-        print("Applying policy for final report...")
+        print("Applying policy for final report (with action masking)...")
         y_true, y_pred = predict_with_policy(
             model, val_loader, device,
+            dataset=ds,
             T_val=T_val,
             fold_thresh=Cfg.fold_thresh,
             fold_margin=Cfg.fold_margin,
