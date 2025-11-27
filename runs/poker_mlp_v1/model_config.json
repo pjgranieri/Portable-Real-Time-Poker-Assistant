@@ -2,13 +2,13 @@
   "model_type": "PokerMLP",
   "architecture": {
     "static_dim": 372,
-    "numeric_dim": 15,
-    "num_classes": 6,
+    "numeric_dim": 24,
+    "num_classes": 4,
     "version": "v2_attention"
   },
   "training": {
-    "batch_size": 512,
-    "learning_rate": 0.0001,
+    "batch_size": 1024,
+    "learning_rate": 0.001,
     "weight_decay": 1e-05,
     "use_focal": false,
     "focal_gamma": null

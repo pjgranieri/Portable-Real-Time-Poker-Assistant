@@ -16,29 +16,29 @@ class Cfg:
 
     bot_glob  = ""
     real_glob = ""
-    gto_glob  = r"C:\Users\nickl\OneDrive\Documents\Computer-Vision-Powered-AI-Poker-Coach\ML Model Work\Model\Poker Data (GTO v2)\data(gto_v2)_*.csv"
+    gto_glob  = r"C:\Users\nickl\OneDrive\Documents\Computer-Vision-Powered-AI-Poker-Coach\ML Model Work\Model\Poker Data Final (Multi-Player)\data(gto_v2)_*.csv"
     gto_v3_glob = ""
+    # Multi-player synthetic data
+    multiplayer_glob = r"C:\Users\nickl\OneDrive\Documents\Computer-Vision-Powered-AI-Poker-Coach\ML Model Work\Model\Poker Data Final (Multi-Player)\data_*player_synthetic.csv"
 
-    use_focal = False
-    focal_gamma = 2.0
-    label_smoothing = 0.0
+    use_focal = False  # Enable focal loss to handle class imbalance
+    focal_gamma = 1.2  # Reduced from 2.0 to reduce over-confidence
+    label_smoothing = 0.15  # Increased from 0.1 to soften targets and reduce overconfidence
 
-    batch_size   = 512
-    lr           = 1e-4
-    lr_min       = 1e-6
+    batch_size   = 1024
+    lr           = 1e-3
+    lr_min       = 1e-8
     weight_decay = 1e-5
     max_epochs   = 100   
-    val_split    = 0.15  
+    val_split    = 0.05 
     num_workers  = 8     
-    patience     = 4
+    patience     = 16
 
     streets   = ["preflop", "flop", "turn", "river"]
     positions = ["Early", "Late", "Blinds", "Unknown"]
 
-    classes = ["fold", "check", "call", "raise_s", "raise_m", "raise_l"]
-
-    raise_small_max_bb  = 4.0
-    raise_medium_max_bb = 12.0
+    # Updated to 4 classes: merged raise_s/raise_m/raise_l into single 'raise'
+    classes = ["fold", "check", "call", "raise"]
 
     weight_bot_preflop    = 1.0
     weight_real_preflop   = 1.0
@@ -74,6 +74,20 @@ COLUMN_NAMES = {
         "was_pfr",
         "street_index",
         "raises_this_street",
+        # Hand strength features (added from Treys evaluator)
+        "hand_bucket",
+        "has_flush_draw",
+        "has_straight_draw",
+        "has_combo_draw",
+        "is_missed_draw_river",
+        # Multi-player features (added for 3-4 player support)
+        "num_active_players",
+        "num_players_to_act",
+        "multiway_pot_flag",
+        "position_relative",
+        "num_callers_this_street",
+        "num_raisers_this_street",
+        "avg_opp_stack_bb",
     ],
 
     "categorical_pref": [
@@ -182,7 +196,7 @@ class PokerDataset(Dataset):
                         delimiter = ','
 
                 #  Read/ normalize
-                df = pd.read_csv(p, delimiter=delimiter, encoding="utf-8-sig")
+                df = pd.read_csv(p, delimiter=delimiter, encoding="utf-8-sig", low_memory=False)
                 df.columns = (
                     df.columns.astype(str)
                       .str.replace("\ufeff", "", regex=False)
@@ -328,39 +342,24 @@ class PokerDataset(Dataset):
         self.street_vocab = Cfg.streets
         self.pos_vocab    = Cfg.positions  
 
-        # Vectorize labels
+        # Vectorize labels (simplified for 4-class model)
         print("[PokerDataset] Vectorizing labels...")
         act_col = self.df[COLUMN_NAMES["action"]].astype(str).str.lower().str.strip()
         default_choice = Cfg.classes.index("check")
         
-        conditions = [act_col == "fold", act_col == "check", act_col == "call"]
-        choices    = [Cfg.classes.index("fold"), Cfg.classes.index("check"), Cfg.classes.index("call")]
-
-        conditions.extend([
-            act_col == "raise_s",
-            act_col == "raise_m", 
-            act_col == "raise_l",
-        ])
-        choices.extend([
-            Cfg.classes.index("raise_s"),
-            Cfg.classes.index("raise_m"),
-            Cfg.classes.index("raise_l"),
-        ])
-
-        size = pd.to_numeric(self.df.get("raise_to_bb"), errors="coerce")
-        frac = pd.to_numeric(self.df.get("bet_frac_of_pot"), errors="coerce").fillna(0.0)
-        fallback_size = 2.5 * frac
-        use_fallback = (~np.isfinite(size)) | (size <= 0)
-        size = size.where(~use_fallback, fallback_size).clip(lower=0.0, upper=1e6)
-        is_raise_action = act_col.isin(["raise", "bet", "allin"])
-        conditions.extend([
-            is_raise_action & (size <= Cfg.raise_small_max_bb),
-            is_raise_action & (size > Cfg.raise_small_max_bb) & (size <= Cfg.raise_medium_max_bb),
-            is_raise_action & (size > Cfg.raise_medium_max_bb),
-        ])
-        choices.extend([
-            Cfg.classes.index("raise_s"), Cfg.classes.index("raise_m"), Cfg.classes.index("raise_l"),
-        ])
+        # Map all action strings to class indices
+        conditions = [
+            act_col == "fold",
+            act_col == "check",
+            act_col == "call",
+            act_col.isin(["raise", "bet", "allin", "raise_s", "raise_m", "raise_l"])  # All raise variants → 'raise'
+        ]
+        choices = [
+            Cfg.classes.index("fold"),
+            Cfg.classes.index("check"),
+            Cfg.classes.index("call"),
+            Cfg.classes.index("raise")
+        ]
         
         self.df["__label"] = np.select(conditions, choices, default=default_choice).astype(np.int64)
         print("[PokerDataset] Labels vectorized.")
@@ -522,32 +521,80 @@ class PokerDataset(Dataset):
 # Model
 # ----------------------------
 class PokerMLP(nn.Module):
-    def __init__(self, static_dim: int, numeric_dim: int, num_classes: int):
+    def __init__(self, static_dim: int, numeric_dim: int, num_classes: int, deep=False):
         super().__init__()
         
-        self.static_net = nn.Sequential(
-            nn.Linear(static_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        
-        self.numeric_net = nn.Sequential(
-            nn.Linear(numeric_dim, 64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, 32),
-            nn.ReLU()
-        )
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(160, 128),
-            nn.ReLU(),
-            nn.Dropout(0.15),
-            nn.Linear(128, num_classes)
-        )
+        if deep:
+            # DEEPER ARCHITECTURE: More layers for complex pattern learning
+            # Static features: cards, position, action history
+            self.static_net = nn.Sequential(
+                nn.Linear(static_dim, 512),      # 512 neurons (2x original)
+                nn.ReLU(),
+                nn.BatchNorm1d(512),             # Batch norm helps deep networks
+                nn.Dropout(0.2),
+                nn.Linear(512, 256),
+                nn.ReLU(),
+                nn.BatchNorm1d(256),
+                nn.Dropout(0.15),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            )
+            
+            # Numeric features: pot, stack, SPR, bet sizing
+            self.numeric_net = nn.Sequential(
+                nn.Linear(numeric_dim, 128),     # 128 neurons (2x original)
+                nn.ReLU(),
+                nn.BatchNorm1d(128),
+                nn.Dropout(0.15),
+                nn.Linear(128, 64),
+                nn.ReLU(),
+                nn.BatchNorm1d(64),
+                nn.Dropout(0.1),
+                nn.Linear(64, 32),
+                nn.ReLU()
+            )
+            
+            # Classifier: combines static + numeric features
+            self.classifier = nn.Sequential(
+                nn.Linear(160, 256),             # 160 = 128 (static) + 32 (numeric)
+                nn.ReLU(),
+                nn.BatchNorm1d(256),
+                nn.Dropout(0.2),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.BatchNorm1d(128),
+                nn.Dropout(0.15),
+                nn.Linear(128, 64),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(64, num_classes)
+            )
+        else:
+            # ORIGINAL ARCHITECTURE: Proven to work well
+            self.static_net = nn.Sequential(
+                nn.Linear(static_dim, 256),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Dropout(0.1)
+            )
+            
+            self.numeric_net = nn.Sequential(
+                nn.Linear(numeric_dim, 64),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(64, 32),
+                nn.ReLU()
+            )
+            
+            self.classifier = nn.Sequential(
+                nn.Linear(160, 128),
+                nn.ReLU(),
+                nn.Dropout(0.15),
+                nn.Linear(128, num_classes)
+            )
 
     def forward(self, static_x, numeric_x):
         static_features = self.static_net(static_x)
@@ -609,6 +656,29 @@ def collate_with_scaler(batch, scaler: Optional[StandardScaler], n_scaled_cols: 
     y = torch.tensor(ys, dtype=torch.long)
     w = torch.tensor(ws, dtype=torch.float32)
     return statics, numerics, y, w
+
+
+def apply_label_smoothing(y_true, num_classes, smoothing=0.0):
+    """
+    Apply label smoothing to target labels.
+    
+    Args:
+        y_true: Long tensor of class indices (batch_size,)
+        num_classes: Number of classes
+        smoothing: Smoothing parameter (0.0 = no smoothing, 0.1 = 10% smoothing)
+    
+    Returns:
+        Smoothed probability distribution (batch_size, num_classes)
+    
+    Formula: smooth_target = (1 - smoothing) * one_hot + smoothing / num_classes
+    """
+    if smoothing == 0.0:
+        return torch.nn.functional.one_hot(y_true, num_classes).float()
+    
+    # Use one_hot which creates a proper tensor, then apply smoothing
+    one_hot = torch.nn.functional.one_hot(y_true, num_classes).float()
+    smooth_dist = one_hot * (1.0 - smoothing) + smoothing / num_classes
+    return smooth_dist
 
 
 @torch.no_grad()
@@ -696,90 +766,6 @@ def predict_with_policy(model, loader, device, T_val=1.0, fold_thresh=0, fold_ma
     true_cat = torch.cat(all_true, 0).numpy() if all_true else np.array([], dtype=np.int64)
     pred_cat = torch.cat(all_pred, 0).numpy() if all_pred else np.array([], dtype=np.int64)
     return true_cat, pred_cat
-@torch.no_grad()
-def debug_fold2call_breakdown(model, loader, device, numeric_colnames):
-    """
-    Prints where misclassifications 'true=fold' -> 'pred=call' happen,
-    bucketed by pot_odds, to_call_over_effstack, and street_index.
-    """
-    model.eval()
-    def idx_of(name, default=None):
-        try: return numeric_colnames.index(name)
-        except ValueError:
-            return default
-
-    pot_idx   = idx_of("pot_odds")
-    comm_idx  = idx_of("to_call_over_effstack")
-    street_i  = idx_of("street_index")
-
-    if pot_idx is None and comm_idx is None and street_i is None:
-        print("[debug_fold2call] None of the expected columns found. Skipping.")
-        return
-
-    fold_idx = Cfg.classes.index("fold")
-    call_idx = Cfg.classes.index("call")
-
-    pot_bins   = [0.00, 0.15, 0.25, 0.33, 0.50, 1.00]
-    comm_bins  = [0.00, 0.005, 0.01, 0.02, 0.05, 0.10, 1.00]
-    street_lbl = {0:"preflop", 1:"flop", 2:"turn", 3:"river"}
-
-    import numpy as np
-    pot_hist      = np.zeros(len(pot_bins)-1, dtype=int)
-    comm_hist     = np.zeros(len(comm_bins)-1, dtype=int)
-    street_hist   = np.zeros(4, dtype=int)
-
-    total_fold = 0
-    f2c = 0
-
-    for statics, numerics, y, w in loader:
-        statics, numerics = statics.to(device), numerics.to(device)
-        logits = model(statics, numerics)
-        pred = logits.argmax(1).cpu().numpy()
-        y_np = y.numpy()
-        num_np = numerics.cpu().numpy()
-
-        mask_fold = (y_np == fold_idx)
-        total_fold += int(mask_fold.sum())
-
-        mask_f2c = mask_fold & (pred == call_idx)
-        if not mask_f2c.any():
-            continue
-        f2c += int(mask_f2c.sum())
-
-        if pot_idx is not None:
-            vals = num_np[mask_f2c, pot_idx]
-            pot_hist += np.histogram(vals, bins=pot_bins)[0]
-        if comm_idx is not None:
-            vals = num_np[mask_f2c, comm_idx]
-            comm_hist += np.histogram(vals, bins=comm_bins)[0]
-        if street_i is not None:
-            vals = num_np[mask_f2c, street_i].astype(int)
-            for v in vals:
-                if 0 <= v < 4: street_hist[v] += 1
-
-    print("\n[debug_fold2call] --- Fold→Call breakdown ---")
-    print(f"Total true FOLD rows in val: {total_fold}")
-    print(f"Fold→Call errors: {f2c}  ({(f2c/max(1,total_fold))*100:.2f}%)")
-
-    if pot_idx is not None:
-        labels = [f"{pot_bins[i]:.2f}-{pot_bins[i+1]:.2f}" for i in range(len(pot_bins)-1)]
-        print("\nBy pot_odds bucket (cost / (pot+cost)):")
-        for lab, c in zip(labels, pot_hist):
-            print(f"  {lab}: {c}")
-
-    if comm_idx is not None:
-        labels = [f"{comm_bins[i]:.3f}-{comm_bins[i+1]:.3f}" for i in range(len(comm_bins)-1)]
-        print("\nBy commitment bucket (to_call / eff_stack):")
-        for lab, c in zip(labels, comm_hist):
-            print(f"  {lab}: {c}")
-
-    if street_i is not None:
-        print("\nBy street:")
-        for si in range(4):
-            print(f"  {street_lbl.get(si, si)}: {street_hist[si]}")
-    print("[debug_fold2call] --------------------------------\n")
-
-
 def train():
     set_seed(Cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -788,23 +774,24 @@ def train():
     bot_files = []
     gto_files = glob.glob(Cfg.gto_glob) if Cfg.gto_glob else []
     gto_v3_files = []
+    multiplayer_files = glob.glob(Cfg.multiplayer_glob) if Cfg.multiplayer_glob else []
     
-    paths = gto_files
+    # Combine all data sources
+    paths = gto_files + multiplayer_files
     if not paths:
-        raise SystemExit("No CSV files found. Check Cfg.gto_glob path.")
+        raise SystemExit("No CSV files found. Check Cfg.gto_glob and Cfg.multiplayer_glob paths.")
     
     print(f"\n{'='*80}")
-    print(f"LOADING ENHANCED GTO v2 DATASET (1,400,000 examples)")
+    print(f"LOADING MULTI-PLAYER DATASET")
     print(f"{'='*80}")
-    print(f"Total files: {len(gto_files)} files")
-    print(f"  - Original GTO v2: 210 files (1.05M examples)")
-    print(f"  - Call-focused: 20 files (100k examples)")
-    print(f"  - Short stack: 30 files (150k examples)")
-    print(f"  - Aggression: 20 files (100k examples)")
-    print(f"Expected total examples: ~1,400,000")
+    print(f"Total files: {len(paths)} files")
+    print(f"  - Augmented heads-up (GTO v2): {len(gto_files)} files")
+    print(f"  - Multi-player synthetic: {len(multiplayer_files)} files")
     print(f"Position encoding: 3 categories (Early, Late, Blinds)")
-    print(f"Action balance: Improved call representation + diverse aggression")
-    print(f"Bet diversity: Small (27.5%), Medium (38.1%), Large (28.1%), Overbet (6.4%)")
+    print(f"Multi-player features: 7 new features added")
+    print(f"  - num_active_players, num_players_to_act, multiway_pot_flag")
+    print(f"  - position_relative, num_callers_this_street, num_raisers_this_street")
+    print(f"  - avg_opp_stack_bb")
     print(f"{'='*80}\n")
 
     ds = PokerDataset(paths)
@@ -905,7 +892,20 @@ def train():
     print(f"[Scheduler] This will automatically reduce LR when validation loss plateaus")
     print(f"[Scheduler] Expected LR schedule: 5e-4 → 2.5e-4 → 1.25e-4 → 6.25e-5 → ... → 1e-6")
     
-    criterion = nn.CrossEntropyLoss(reduction="none")
+    # Choose loss function based on config
+    if Cfg.use_focal:
+        # Use focal loss WITHOUT class weights - let FocalLoss handle imbalance naturally
+        # Previous attempts: 2.5x call weight caused 44% fold→call errors, 1.5x caused model to predict call even in no-bet situations
+        # Focal loss with gamma=2.0 should be enough to handle minority classes without artificial weights
+        alpha = torch.tensor([1.0, 1.0, 1.0, 1.0], device=device)  # [fold, check, call, raise] - all equal
+        criterion = FocalLoss(alpha=alpha, gamma=Cfg.focal_gamma, reduction='none')
+        print(f"[Loss] Using FocalLoss with gamma={Cfg.focal_gamma}, alpha={alpha.cpu().tolist()}")
+        print(f"[Loss] NO class weights - letting FocalLoss gamma={Cfg.focal_gamma} handle imbalance naturally")
+    else:
+        # NOTE: PyTorch CrossEntropyLoss doesn't support label_smoothing with reduction='none'
+        # So we implement label smoothing manually in the loss computation
+        criterion = nn.CrossEntropyLoss(reduction="none")
+        print(f"[Loss] Using CrossEntropyLoss with label_smoothing={Cfg.label_smoothing}")
 
     history = {"train_loss": [], "val_loss": [], "val_acc": [], "lr": []}
     best_val = float("inf")
@@ -924,7 +924,18 @@ def train():
             for step, (statics, numerics, y, w) in enumerate(train_loader, start=1):
                 statics, numerics, y, w = statics.to(device), numerics.to(device), y.to(device), w.to(device)
                 logits = model(statics, numerics)
-                loss_vec = criterion(logits, y)
+                
+                # Apply label smoothing if not using focal loss
+                if not Cfg.use_focal and Cfg.label_smoothing > 0:
+                    # Use KL divergence with smoothed labels
+                    log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+                    smooth_targets = apply_label_smoothing(y, len(Cfg.classes), Cfg.label_smoothing)
+                    # KL divergence: -sum(target * log_pred)
+                    loss_vec = -(smooth_targets * log_probs).sum(dim=1)
+                else:
+                    # Standard cross-entropy (for focal loss or no smoothing)
+                    loss_vec = criterion(logits, y)
+                
                 loss = (loss_vec * w).mean()
 
                 opt.zero_grad()
@@ -1028,9 +1039,7 @@ def train():
             fold_thresh=Cfg.fold_thresh,
             fold_margin=Cfg.fold_margin,
             call_bias_logit=Cfg.call_logit_bias,
-
         )
-        debug_fold2call_breakdown(model, val_loader, device, ds.numeric_cols)
 
         os.makedirs(Cfg.out_dir, exist_ok=True)
 
@@ -1086,8 +1095,7 @@ def train():
         "street_vocab": Cfg.streets,
         "pos_vocab": Cfg.positions,
         "classes": Cfg.classes,
-        "raise_small_max_bb": Cfg.raise_small_max_bb,
-        "raise_medium_max_bb": Cfg.raise_medium_max_bb,
+        # Removed raise_small_max_bb and raise_medium_max_bb (no longer used with 4-class model)
         "static_dim": ds.static_dim if ds else 0,
         "card_dim": ds.card_dim if ds else 0,
         "numeric_dim": (ds.numeric_mat.shape[1] if ds else 0),
@@ -1099,7 +1107,9 @@ def train():
             "call_logit_bias": Cfg.call_logit_bias
         },
         "loss": {
-            "type": "crossentropy",
+            "type": "focal" if Cfg.use_focal else "crossentropy",
+            "focal_gamma": Cfg.focal_gamma if Cfg.use_focal else None,
+            "class_weights": [1.0, 1.0, 1.0, 1.0] if Cfg.use_focal else None,
             "label_smoothing": Cfg.label_smoothing
         }
     }

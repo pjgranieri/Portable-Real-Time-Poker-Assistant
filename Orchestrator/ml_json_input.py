@@ -9,12 +9,20 @@ import json
 class MLJSONGenerator:
     def __init__(self):
         self.hand_id = 0  # Game counter (increments each new game)
-        self.last_action = ""  # Track last action taken
+        self.last_action = ""  # Track last action taken THIS ROUND
         self.first_to_act = True  # Track if anyone has acted yet THIS ROUND
+        self.action_history = []  # Full action history for entire hand: [{player, street, action, amount}, ...]
+        self.current_street = "preflop"  # Track current betting round
     
     def increment_hand(self):
         """Increment hand counter for new game"""
         self.hand_id += 1
+        self.reset_hand()
+    
+    def reset_hand(self):
+        """Reset all tracking for new hand"""
+        self.action_history = []
+        self.current_street = "preflop"
         self.reset_round()
     
     def reset_round(self):
@@ -22,22 +30,46 @@ class MLJSONGenerator:
         self.last_action = ""
         self.first_to_act = True
     
-    def set_last_action(self, action):
-        """Update last action taken"""
+    def record_action(self, player_name, action, amount=0):
+        """
+        Record an action in the full hand history
+        
+        Args:
+            player_name: "PlayerCoach" or "PlayerOne" 
+            action: "fold", "check", "call", "raise"
+            amount: chips involved (for raise, this is the total raise-to amount)
+        """
         # Simplify action text - remove player name, just keep action
         action_lower = action.lower()
         if "fold" in action_lower:
-            self.last_action = "fold"
+            action_type = "fold"
         elif "check" in action_lower:
-            self.last_action = "check"
+            action_type = "check"
         elif "call" in action_lower:
-            self.last_action = "call"
-        elif "raise" in action_lower:
-            self.last_action = "raise"
+            action_type = "call"
+        elif "raise" in action_lower or "bet" in action_lower:
+            action_type = "raise"
         else:
-            self.last_action = action
+            action_type = action
         
+        # Add to history
+        self.action_history.append({
+            'player': player_name,
+            'street': self.current_street,
+            'action': action_type,
+            'amount': amount
+        })
+        
+        # Update last action for this round
+        self.last_action = action_type
         self.first_to_act = False
+    
+    def set_street(self, game_state):
+        """Update current street and reset round tracking"""
+        new_street = self.get_round_name(game_state)
+        if new_street != self.current_street:
+            self.current_street = new_street
+            self.reset_round()
     
     def get_round_name(self, game_state):
         """Convert GameState to round name"""
@@ -68,6 +100,9 @@ class MLJSONGenerator:
         Returns:
             JSON string ready to send to ML model (cards in SUIT|VALUE format)
         """
+        # Update street tracking
+        self.set_street(game_state)
+        
         # Get coach hole cards and convert to ML format
         coach_cards = cards.hole_cards.get(Player.PlayerCoach, ["", ""])
         hole1 = CardConverter.convert_to_ml_format(coach_cards[0]) if len(coach_cards) > 0 else ""
@@ -98,6 +133,8 @@ class MLJSONGenerator:
         action = "" if self.first_to_act else self.last_action
 
         # Build JSON payload
+        
+        # Build JSON payload with action history
         payload = {
             "hand_id": self.hand_id,
             "player_id": Player.PlayerCoach.value,  # Always 0 for coach
@@ -118,6 +155,7 @@ class MLJSONGenerator:
             "to_call_bb": call_value,
             "pot_bb": community_pot,
             "action": action,
+            "action_history": self.action_history,  # Pass full action history
             "final_pot_bb": ""  # Only filled at showdown
         }
 

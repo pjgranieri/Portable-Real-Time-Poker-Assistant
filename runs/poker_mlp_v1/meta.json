@@ -10,18 +10,31 @@
     "was_pfr",
     "street_index",
     "raises_this_street",
+    "hand_bucket",
+    "has_flush_draw",
+    "has_straight_draw",
+    "has_combo_draw",
+    "is_missed_draw_river",
     "board_texture_dry",
+    "board_texture_nan",
     "board_texture_wet",
+    "pot_type_3bet",
+    "pot_type_4bet",
     "pot_type_limped",
     "pot_type_single_raised",
-    "pot_type_three_bet"
+    "pot_type_three_bet",
+    "pot_type_unopened"
   ],
   "binary_cols": [
     "board_texture_dry",
+    "board_texture_nan",
     "board_texture_wet",
+    "pot_type_3bet",
+    "pot_type_4bet",
     "pot_type_limped",
     "pot_type_single_raised",
-    "pot_type_three_bet"
+    "pot_type_three_bet",
+    "pot_type_unopened"
   ],
   "street_vocab": [
     "preflop",
@@ -39,17 +52,13 @@
     "fold",
     "check",
     "call",
-    "raise_s",
-    "raise_m",
-    "raise_l"
+    "raise"
   ],
-  "raise_small_max_bb": 4.0,
-  "raise_medium_max_bb": 12.0,
   "static_dim": 372,
   "card_dim": 364,
-  "numeric_dim": 15,
-  "n_scaled_cols": 10,
-  "temperature": 1.0203090906143188,
+  "numeric_dim": 24,
+  "n_scaled_cols": 15,
+  "temperature": 0.6398467421531677,
   "policy": {
     "fold_thresh": 0.0,
     "fold_margin": 0.0,
@@ -57,6 +66,8 @@
   },
   "loss": {
     "type": "crossentropy",
-    "label_smoothing": 0.0
+    "focal_gamma": null,
+    "class_weights": null,
+    "label_smoothing": 0.15
   }
 }

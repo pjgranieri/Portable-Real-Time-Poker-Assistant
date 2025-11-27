@@ -117,17 +117,6 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
         # Ask for action (pass min_raise_total so InputInterface can validate)
         action, value = players.get_action(current_player, crop_region, amount_needed_to_call, min_raise_total)
         
-        # Update last action in ML generator (simplified) - NOW we track actions
-        if ml_generator:
-            if action == "raise":
-                ml_generator.set_last_action("raise")
-            elif action == "call":
-                ml_generator.set_last_action("call")
-            elif action == "check":
-                ml_generator.set_last_action("check")
-            elif action == "fold":
-                ml_generator.set_last_action("fold")
-        
         if action == "fold":
             player_data["folded"] = True
             players_acted[current_player] = True

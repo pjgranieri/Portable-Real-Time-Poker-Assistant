@@ -47,7 +47,6 @@ class TestGameOrchestrator:
         """
         # If this is the coach and ML is enabled, use ML model
         if player_enum == Player.PlayerCoach and ML_ENABLED:
-            # Generate JSON for ML model
             json_payload = self.ml_generator.generate_json_for_coach_action(
                 game_state=self.state,
                 cards=self.cards,
@@ -56,18 +55,22 @@ class TestGameOrchestrator:
                 call_value=call_value
             )
             
-            # Get ML prediction
-            action, value = ml_get_action(json_payload)
+            action, value = ml_get_action(json_payload, ml_generator=self.ml_generator)
             return (action, value)
         
-        # Otherwise use manual input
+        # Manual input for opponent
         player_data = self.players.get(player_enum)
-        return self.input_interface.get_action(
+        action, value = self.input_interface.get_action(
             player_enum.name,
             call_value,
             player_data["bankroll"],
             min_raise_total=min_raise_total
         )
+        
+        if player_enum != Player.PlayerCoach:
+            self.ml_generator.record_action(player_enum.name, action, value)
+        
+        return (action, value)
     
     def mock_read_showdown_hands(self, remaining_players):
         """Manual input for player hands at showdown"""
@@ -159,6 +162,7 @@ class TestGameOrchestrator:
         
         # Initialize/reset all values
         self.players.initialize_bankrolls()
+        self.cards.reset()
         self.community_pot = 0
         self.call_value = 0
         
