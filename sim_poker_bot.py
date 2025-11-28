@@ -1,10 +1,11 @@
 """
-Poker simulation: AI model vs 3 bots using PyPokerEngine.
+Poker simulation: AI model vs 3 SuperBots using PyPokerEngine.
 Tracks performance and saves detailed results to sim_results.csv.
 """
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'ML Model Work', 'Model'))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'ML Model Work', 'Data Generation'))
 
 import torch
 import pandas as pd
@@ -21,6 +22,9 @@ import json
 from Orchestrator.ml_module import get_action, reset_game
 from Orchestrator.card_converter import pypoker_to_internal
 
+# Import SuperBot from pokerBotDataCreator
+from pokerBotDataCreator import SuperBot
+
 
 class AIModelPlayer(BasePokerPlayer):
     """Your trained AI model using FULL LiveHandTracker integration."""
@@ -33,6 +37,7 @@ class AIModelPlayer(BasePokerPlayer):
         self.current_hand_actions = []  # Actions in current hand
         self.current_hand_num = 0
         self.big_blind = 10.0  # Will be set properly in game
+        self.json_log = []  # NEW: Store all decisions with full details for JSON output
         # Note: model_path not needed - LiveHandTracker loads its own model
         
     def declare_action(self, valid_actions, hole_card, round_state):
@@ -45,13 +50,24 @@ class AIModelPlayer(BasePokerPlayer):
         # Call the FULL ORCHESTRATOR INTEGRATION
         # This goes through: ml_module → LiveHandTracker → Model + Heuristics + Improved Raise Sizing
         try:
-            ml_action, ml_amount = get_action(json_payload)
+            # Capture terminal output for JSON logging
+            import io
+            from contextlib import redirect_stdout
+            
+            output_buffer = io.StringIO()
+            with redirect_stdout(output_buffer):
+                ml_action, ml_amount = get_action(json_payload)
+            
+            terminal_output = output_buffer.getvalue()
             
             # Map to PyPokerEngine valid actions
             action, amount = self._map_ml_to_pypoker(ml_action, ml_amount, valid_actions, round_state)
             
-            # Store for history
-            self._record_decision(hole_card, round_state, action, amount, ml_action, ml_amount)
+            # Store for history AND JSON log
+            self._record_decision(hole_card, round_state, action, amount, ml_action, ml_amount, terminal_output)
+            
+            # Print to terminal so user can still see it
+            print(terminal_output, end='')
             
             return action, amount
             
@@ -174,8 +190,8 @@ class AIModelPlayer(BasePokerPlayer):
                 return action_name, action_info['amount']
         return valid_actions[0]['action'], valid_actions[0]['amount']
     
-    def _record_decision(self, hole_card, round_state, action, amount, ml_action, ml_amount):
-        """Record decision for later analysis."""
+    def _record_decision(self, hole_card, round_state, action, amount, ml_action, ml_amount, terminal_output=""):
+        """Record decision for later analysis AND JSON logging."""
         street = round_state['street']
         pot = round_state['pot']['main']['amount']
         
@@ -183,6 +199,7 @@ class AIModelPlayer(BasePokerPlayer):
         my_uuid = self.uuid
         seats = round_state['seats']
         my_seat_idx = next(i for i, s in enumerate(seats) if s['uuid'] == my_uuid)
+        my_seat = next(s for s in seats if s['uuid'] == my_uuid)
         dealer_btn = round_state['dealer_btn']
         
         # Determine position name
@@ -194,6 +211,12 @@ class AIModelPlayer(BasePokerPlayer):
             pos_names = [f'P{i}' for i in range(num_players)]
         position = pos_names[relative_pos] if relative_pos < len(pos_names) else f'P{relative_pos}'
         
+        # Parse terminal output for key details
+        probabilities = self._extract_probabilities(terminal_output)
+        hand_bucket = self._extract_bucket(terminal_output)
+        board_warnings = self._extract_board_warnings(terminal_output)
+        heuristic_triggers = self._extract_heuristic_triggers(terminal_output)
+        
         record = {
             'hand_num': self.current_hand_num,
             'street': street,
@@ -201,13 +224,71 @@ class AIModelPlayer(BasePokerPlayer):
             'hole_cards': str(hole_card),
             'community': str(round_state.get('community_card', [])),
             'pot': pot,
+            'stack': my_seat['stack'],
             'ml_action': ml_action,
             'ml_amount': ml_amount,
             'final_action': action,
             'final_amount': amount,
         }
+        
+        # JSON log entry with FULL details
+        json_entry = {
+            **record,
+            'probabilities': probabilities,
+            'hand_bucket': hand_bucket,
+            'board_warnings': board_warnings,
+            'heuristic_triggers': heuristic_triggers,
+            'raw_output': terminal_output,
+        }
+        
         self.hand_history.append(record)
         self.current_hand_actions.append(record)
+        self.json_log.append(json_entry)
+    
+    def _extract_probabilities(self, output):
+        """Extract probability dict from terminal output."""
+        import re
+        match = re.search(r"Probabilities: (\{[^}]+\})", output)
+        if match:
+            try:
+                return eval(match.group(1))  # Safe since it's our own output
+            except:
+                pass
+        return {}
+    
+    def _extract_bucket(self, output):
+        """Extract hand_bucket from terminal output."""
+        import re
+        match = re.search(r"Bucket=([\d.]+)", output)
+        return float(match.group(1)) if match else None
+    
+    def _extract_board_warnings(self, output):
+        """Extract board texture warnings."""
+        warnings = []
+        if "DANGEROUS BOARD" in output:
+            import re
+            match = re.search(r"Paired=([\d.]+), Monotone=([\d.]+), Connected=([\d.]+)", output)
+            if match:
+                warnings.append({
+                    'paired': float(match.group(1)),
+                    'monotone': float(match.group(2)),
+                    'connected': float(match.group(3))
+                })
+        return warnings
+    
+    def _extract_heuristic_triggers(self, output):
+        """Extract which heuristics triggered."""
+        triggers = []
+        # Match the actual print statements more carefully (include colons)
+        if "PAIRED BOARD DEFENSE:" in output or "PAIRED BOARD:" in output:
+            triggers.append("paired_board_defense")
+        if "MONOTONE BOARD DEFENSE:" in output or "CONNECTED BOARD DEFENSE:" in output:
+            triggers.append("coordinated_board_defense")
+        if "MONOTONE BOARD:" in output or "CONNECTED BOARD:" in output:
+            triggers.append("coordinated_board_checking")
+        if "OVERRIDE: Terrible hand" in output:
+            triggers.append("terrible_hand_override")
+        return triggers
     
     def receive_game_start_message(self, game_info):
         """Called at start of game."""
@@ -261,154 +342,10 @@ class AIModelPlayer(BasePokerPlayer):
             self.detailed_hands.append(hand_summary)
 
 
-class RandomPlayer(BasePokerPlayer):
-    """Random action bot for baseline."""
-    
-    def __init__(self, name="Random_Bot"):
-        super().__init__()
-        self.name = name
-    
-    def declare_action(self, valid_actions, hole_card, round_state):
-        action_info = random.choice(valid_actions)
-        action = action_info['action']
-        
-        if action == 'raise':
-            amount = random.randint(action_info['amount']['min'], action_info['amount']['max'])
-        else:
-            amount = action_info['amount']
-        
-        return action, amount
-    
-    def receive_game_start_message(self, game_info):
-        pass
-    
-    def receive_round_start_message(self, round_count, hole_card, seats):
-        pass
-    
-    def receive_street_start_message(self, street, round_state):
-        pass
-    
-    def receive_game_update_message(self, action, round_state):
-        pass
-    
-    def receive_round_result_message(self, winners, hand_info, round_state):
-        pass
-
-
-class TightAggressivePlayer(BasePokerPlayer):
-    """Tight-aggressive bot (only plays strong hands, bets aggressively)."""
-    
-    def __init__(self, name="TAG_Bot"):
-        super().__init__()
-        self.name = name
-    
-    def declare_action(self, valid_actions, hole_card, round_state):
-        # Estimate hand strength
-        community = round_state.get('community_card', [])
-        win_rate = estimate_hole_card_win_rate(
-            nb_simulation=100,
-            nb_player=4,
-            hole_card=gen_cards(hole_card),
-            community_card=gen_cards(community) if community else None
-        )
-        
-        # Tight-aggressive strategy
-        if win_rate > 0.6:
-            # Strong hand - raise/bet
-            action = 'raise' if self._can_raise(valid_actions) else 'call'
-        elif win_rate > 0.4:
-            # Medium hand - call
-            action = 'call' if self._can_call(valid_actions) else 'check'
-        else:
-            # Weak hand - fold/check
-            action = 'fold' if self._must_pay(valid_actions) else 'check'
-        
-        action_info = next(a for a in valid_actions if a['action'] == action)
-        
-        if action == 'raise':
-            # Raise to 3x BB
-            pot = round_state['pot']['main']['amount']
-            target = min(pot, action_info['amount']['max'])
-            return action, max(action_info['amount']['min'], target)
-        
-        return action, action_info['amount']
-    
-    def _can_raise(self, valid_actions):
-        return any(a['action'] == 'raise' for a in valid_actions)
-    
-    def _can_call(self, valid_actions):
-        return any(a['action'] == 'call' for a in valid_actions)
-    
-    def _must_pay(self, valid_actions):
-        return not any(a['action'] == 'check' for a in valid_actions)
-    
-    def receive_game_start_message(self, game_info):
-        pass
-    
-    def receive_round_start_message(self, round_count, hole_card, seats):
-        pass
-    
-    def receive_street_start_message(self, street, round_state):
-        pass
-    
-    def receive_game_update_message(self, action, round_state):
-        pass
-    
-    def receive_round_result_message(self, winners, hand_info, round_state):
-        pass
-
-
-class CallingStationPlayer(BasePokerPlayer):
-    """Calling station bot (calls a lot, rarely folds)."""
-    
-    def __init__(self, name="Calling_Station"):
-        super().__init__()
-        self.name = name
-    
-    def declare_action(self, valid_actions, hole_card, round_state):
-        # Calling station: always call if possible, rarely fold
-        if self._can_call(valid_actions):
-            action = 'call'
-        elif self._can_check(valid_actions):
-            action = 'check'
-        else:
-            # Only fold if forced to pay > 50% of pot
-            pot = round_state['pot']['main']['amount']
-            call_amount = next((a['amount'] for a in valid_actions if a['action'] == 'call'), 0)
-            
-            if call_amount > pot * 0.5:
-                action = 'fold'
-            else:
-                action = 'call'
-        
-        action_info = next(a for a in valid_actions if a['action'] == action)
-        return action, action_info['amount']
-    
-    def _can_call(self, valid_actions):
-        return any(a['action'] == 'call' for a in valid_actions)
-    
-    def _can_check(self, valid_actions):
-        return any(a['action'] == 'check' for a in valid_actions)
-    
-    def receive_game_start_message(self, game_info):
-        pass
-    
-    def receive_round_start_message(self, round_count, hole_card, seats):
-        pass
-    
-    def receive_street_start_message(self, street, round_state):
-        pass
-    
-    def receive_game_update_message(self, action, round_state):
-        pass
-    
-    def receive_round_result_message(self, winners, hand_info, round_state):
-        pass
-
-
 def run_simulation(num_hands=1000, initial_stack=1000, small_blind=5, big_blind=10):
     """
-    Run poker simulation with AI model vs 3 bots using FULL LiveHandTracker integration.
+    Run poker simulation with AI model vs 3 SuperBots using FULL LiveHandTracker integration.
+    SuperBots use equity calculations, position-based play, and different styles (TAG/LAG).
     Players are rebought when they bust out to ensure full 1000 hands are played.
     
     Args:
@@ -424,113 +361,86 @@ def run_simulation(num_hands=1000, initial_stack=1000, small_blind=5, big_blind=
     print(f"Using FULL LiveHandTracker integration (model + heuristics + improved raise sizing)")
     print(f"Initial stack: ${initial_stack}, Blinds: ${small_blind}/${big_blind}")
     print(f"Players will be rebought if they bust out to ensure full {num_hands} hands")
+    print(f"Opponents: 2x TAG SuperBots + 1x LAG SuperBot (MUCH STRONGER THAN BASIC BOTS)")
     print("="*70)
     
     # Create players
     ai_player = AIModelPlayer(name="AI_Model")
     ai_player.big_blind = big_blind  # Set BB size for JSON payload
-    random_bot = RandomPlayer("Random_Bot")
-    tag_bot = TightAggressivePlayer("TAG_Bot")
-    calling_station = CallingStationPlayer("Calling_Station")
+    
+    # Create SuperBot opponents with different styles
+    # TAG bots play tight-aggressive (premium hands, aggressive postflop)
+    # LAG bot plays loose-aggressive (wider range, more bluffs)
+    tag_bot_1 = SuperBot(style_name="TAG")
+    tag_bot_2 = SuperBot(style_name="TAG")
+    lag_bot = SuperBot(style_name="LAG")
     
     # Track results
     results = []
     current_stacks = {
         "AI_Model": initial_stack,
-        "Random_Bot": initial_stack,
-        "TAG_Bot": initial_stack,
-        "Calling_Station": initial_stack
+        "TAG_Bot_1": initial_stack,
+        "TAG_Bot_2": initial_stack,
+        "LAG_Bot": initial_stack
     }
     
-    # Track total investment (initial buy-in + rebuys)
-    total_invested = {
-        "AI_Model": initial_stack,
-        "Random_Bot": initial_stack,
-        "TAG_Bot": initial_stack,
-        "Calling_Station": initial_stack
-    }
-    
-    # Track rebuy counts
+    # Track rebuy counts only (profit calculated as: current_stack - initial_stack - rebuys*initial_stack)
     rebuys = {
         "AI_Model": 0,
-        "Random_Bot": 0,
-        "TAG_Bot": 0,
-        "Calling_Station": 0
+        "TAG_Bot_1": 0,
+        "TAG_Bot_2": 0,
+        "LAG_Bot": 0
     }
     
-    # Play hands in batches, checking for busted players between batches
-    hands_played = 0
-    batch_size = 50  # Check every 50 hands for busted players
+    # Setup game config for entire simulation
+    config = setup_config(
+        max_round=num_hands,
+        initial_stack=initial_stack,
+        small_blind_amount=small_blind
+    )
     
-    while hands_played < num_hands:
-        hands_this_batch = min(batch_size, num_hands - hands_played)
-        
-        # Setup game config for this batch
-        config = setup_config(
-            max_round=hands_this_batch,
-            initial_stack=initial_stack,
-            small_blind_amount=small_blind
-        )
-        
-        config.register_player(name="AI_Model", algorithm=ai_player)
-        config.register_player(name="Random_Bot", algorithm=random_bot)
-        config.register_player(name="TAG_Bot", algorithm=tag_bot)
-        config.register_player(name="Calling_Station", algorithm=calling_station)
-        
-        # Run this batch
-        game_result = start_poker(config, verbose=0)
-        
-        # Update stacks from batch result
-        if 'players' in game_result:
-            for player_info in game_result['players']:
-                player_name = player_info['name']
-                new_stack = player_info['stack']
-                
-                # Check if player busted
-                if new_stack <= 0:
-                    print(f"  {player_name} busted! Rebuy #{rebuys[player_name] + 1}")
-                    new_stack = initial_stack
-                    rebuys[player_name] += 1
-                    total_invested[player_name] += initial_stack
-                
-                current_stacks[player_name] = new_stack
-        
-        hands_played += hands_this_batch
-        
-        if hands_played % 100 == 0:
-            print(f"  Progress: {hands_played}/{num_hands} hands completed")
+    config.register_player(name="AI_Model", algorithm=ai_player)
+    config.register_player(name="TAG_Bot_1", algorithm=tag_bot_1)
+    config.register_player(name="TAG_Bot_2", algorithm=tag_bot_2)
+    config.register_player(name="LAG_Bot", algorithm=lag_bot)
+    
+    # Run entire simulation at once
+    print(f"  Running {num_hands} hands (this may take a while)...")
+    game_result = start_poker(config, verbose=0)
+    
+    # Get final stacks
+    if 'players' in game_result:
+        for player_info in game_result['players']:
+            player_name = player_info['name']
+            current_stacks[player_name] = player_info['stack']
     
     # Final results
     print("\n" + "="*70)
     print("GAME COMPLETE - Final Results")
     print("="*70)
     
-    print(f"\nFinal Stacks and Rebuys:")
-    for player_name in ["AI_Model", "Random_Bot", "TAG_Bot", "Calling_Station"]:
+    print(f"\nFinal Stacks:")
+    for player_name in ["AI_Model", "TAG_Bot_1", "TAG_Bot_2", "LAG_Bot"]:
         final = current_stacks[player_name]
-        invested = total_invested[player_name]
-        net_profit = final - invested
-        rebuy_count = rebuys[player_name]
-        
-        rebuy_str = f" (Rebuys: {rebuy_count})" if rebuy_count > 0 else ""
-        print(f"  {player_name}: ${final} | Invested: ${invested} | Net: ${net_profit:+.0f}{rebuy_str}")
+        net_profit = final - initial_stack
+        roi = (net_profit / initial_stack) * 100
+        print(f"  {player_name}: ${final:.0f} | Net: ${net_profit:+.0f} | ROI: {roi:+.1f}%")
     
-    # Create summary result - use NET profit (final stack - total invested)
-    ai_net_profit = current_stacks['AI_Model'] - total_invested['AI_Model']
+    # Create summary result - use NET profit (final stack - initial_stack)
+    ai_net_profit = current_stacks['AI_Model'] - initial_stack
     
     result = {
         'total_hands': num_hands,
+        'ai_initial_stack': initial_stack,
         'ai_final_stack': current_stacks['AI_Model'],
-        'ai_total_invested': total_invested['AI_Model'],
-        'ai_rebuys': rebuys['AI_Model'],
-        'random_final_stack': current_stacks['Random_Bot'],
-        'random_rebuys': rebuys['Random_Bot'],
-        'tag_final_stack': current_stacks['TAG_Bot'],
-        'tag_rebuys': rebuys['TAG_Bot'],
-        'calling_station_final_stack': current_stacks['Calling_Station'],
-        'calling_station_rebuys': rebuys['Calling_Station'],
         'ai_net_profit': ai_net_profit,
         'ai_profit_per_hand': ai_net_profit / num_hands,
+        'tag_bot_1_final_stack': current_stacks['TAG_Bot_1'],
+        'tag_bot_1_net_profit': current_stacks['TAG_Bot_1'] - initial_stack,
+        'tag_bot_2_final_stack': current_stacks['TAG_Bot_2'],
+        'tag_bot_2_net_profit': current_stacks['TAG_Bot_2'] - initial_stack,
+        'lag_bot_final_stack': current_stacks['LAG_Bot'],
+        'lag_bot_net_profit': current_stacks['LAG_Bot'] - initial_stack,
         'timestamp': datetime.now().isoformat()
     }
     results.append(result)
@@ -544,23 +454,36 @@ def run_simulation(num_hands=1000, initial_stack=1000, small_blind=5, big_blind=
     # Create detailed hand summary DataFrame
     hands_df = pd.DataFrame(ai_player.detailed_hands)
     
+    # Save JSON log with FULL decision details
+    json_log_path = Path(__file__).parent / 'sim_decisions_detailed.json'
+    with open(json_log_path, 'w') as f:
+        json.dump({
+            'summary': result,
+            'decisions': ai_player.json_log,
+            'metadata': {
+                'total_decisions': len(ai_player.json_log),
+                'hands_played': num_hands,
+                'timestamp': datetime.now().isoformat()
+            }
+        }, f, indent=2)
+    
     # Summary statistics
     print("\n" + "="*70)
     print("SIMULATION COMPLETE")
     print("="*70)
     print(f"\nFinal Stacks:")
     print(f"  AI_Model: ${current_stacks['AI_Model']:.2f}")
-    print(f"  Random_Bot: ${current_stacks['Random_Bot']:.2f}")
-    print(f"  TAG_Bot: ${current_stacks['TAG_Bot']:.2f}")
-    print(f"  Calling_Station: ${current_stacks['Calling_Station']:.2f}")
+    print(f"  TAG_Bot_1: ${current_stacks['TAG_Bot_1']:.2f}")
+    print(f"  TAG_Bot_2: ${current_stacks['TAG_Bot_2']:.2f}")
+    print(f"  LAG_Bot: ${current_stacks['LAG_Bot']:.2f}")
     
-    ai_net_profit = current_stacks['AI_Model'] - total_invested['AI_Model']
+    ai_net_profit = current_stacks['AI_Model'] - initial_stack
     print(f"\nAI Model Performance:")
-    print(f"  Total Invested: ${total_invested['AI_Model']:.2f} (Initial: ${initial_stack}, Rebuys: {rebuys['AI_Model']})")
+    print(f"  Initial Stack: ${initial_stack:.2f}")
     print(f"  Final Stack: ${current_stacks['AI_Model']:.2f}")
     print(f"  Net Profit: ${ai_net_profit:.2f}")
     print(f"  Profit per Hand: ${ai_net_profit / num_hands:.2f}")
-    print(f"  ROI: {(ai_net_profit / total_invested['AI_Model']) * 100:.1f}%")
+    print(f"  ROI: {(ai_net_profit / initial_stack) * 100:.1f}%")
     
     print(f"\nDetailed Statistics:")
     print(f"  Total Actions Recorded: {len(actions_df)}")
@@ -569,12 +492,12 @@ def run_simulation(num_hands=1000, initial_stack=1000, small_blind=5, big_blind=
         print(f"  Hands Won: {(hands_df['result'] == 'win').sum()}")
         print(f"  Win Rate: {(hands_df['result'] == 'win').sum() / len(hands_df) * 100:.1f}%")
     
-    return summary_df, actions_df, hands_df
+    return summary_df, actions_df, hands_df, json_log_path
 
 
 if __name__ == '__main__':
     # Configuration
-    NUM_HANDS = 1000  # Full simulation
+    NUM_HANDS = 5000  # Full simulation
     INITIAL_STACK = 1000
     SMALL_BLIND = 5
     BIG_BLIND = 10
@@ -594,7 +517,7 @@ if __name__ == '__main__':
     print("\nThis is the REAL deployment test!\n")
     
     # Run simulation
-    summary_df, actions_df, hands_df = run_simulation(
+    summary_df, actions_df, hands_df, json_log_path = run_simulation(
         num_hands=NUM_HANDS,
         initial_stack=INITIAL_STACK,
         small_blind=SMALL_BLIND,
@@ -611,9 +534,15 @@ if __name__ == '__main__':
     print(f"  Summary: {OUTPUT_CSV}")
     print(f"  Detailed Actions: {base_path}\\sim_actions_detailed.csv")
     print(f"  Detailed Hands: {base_path}\\sim_hands_detailed.csv")
-    print("\nYou can now analyze the results to see:")
-    print("  - Every action the AI took (street, position, cards, decision)")
-    print("  - Which hands the AI won/lost")
-    print("  - Action patterns by street and position")
-    print("  - Performance vs different bot types")
-    print("  - Specific situations where the AI struggled")
+    print(f"  📊 JSON Decision Log: {json_log_path}")
+    print("\n🎯 The JSON log contains FULL details for every decision:")
+    print("  - Probabilities for each action")
+    print("  - Hand bucket values")
+    print("  - Board texture warnings (paired/monotone/connected)")
+    print("  - Which heuristics triggered")
+    print("  - Complete terminal output for each decision")
+    print("\nYou can analyze the JSON to see:")
+    print("  - Why the AI made specific decisions")
+    print("  - If board texture detection is working")
+    print("  - If defensive heuristics are triggering")
+    print("  - Exact probability distributions for each situation")
