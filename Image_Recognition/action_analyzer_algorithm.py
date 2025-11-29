@@ -18,14 +18,21 @@ class ActionAnalyzer:
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         
         # Load YOLO models
-        chip_model_path = os.path.join(self.script_dir, 'Models', 'chip_processing_model.pt')
+        # NEW: Use player_action_model.pt for detecting chips/folded cards in player action zone
+        player_action_model_path = os.path.join(self.script_dir, 'Models', 'player_action_model.pt')
         chip_amount_model_path = os.path.join(self.script_dir, 'Models', 'chip_amount_processing_model.pt')
-        
-        self.chip_model = YOLO(chip_model_path)
-        self.chip_amount_model = YOLO(chip_amount_model_path)
+
+        self.chip_model = YOLO(player_action_model_path)  # Updated to use player_action_model
+
+        # Load chip amount model (optional, only if file exists)
+        if os.path.exists(chip_amount_model_path):
+            self.chip_amount_model = YOLO(chip_amount_model_path)
+        else:
+            self.chip_amount_model = None
+            print("[WARNING] chip_amount_processing_model.pt not found. Chip amount detection disabled.")
         
         # CONFIDENCE THRESHOLDS
-        self.fold_confidence_threshold = 0.30  # Lowered from 0.40
+        self.fold_confidence_threshold = 0.20  # Lowered to improve detection
         self.check_confidence_threshold = 0.40
         
         # ROI CROPPING - Use 65% to include more of the table
@@ -38,8 +45,8 @@ class ActionAnalyzer:
                 self.hands = mp_hands.Hands(
                     static_image_mode=True,
                     max_num_hands=2,
-                    min_detection_confidence=0.3,
-                    min_tracking_confidence=0.3
+                    min_detection_confidence=0.7,  # Increased from 0.3 to reduce false positives
+                    min_tracking_confidence=0.7    # Increased from 0.3 to reduce false positives
                 )
                 print("[INFO] MediaPipe Hands initialized successfully")
             except Exception as e:
@@ -280,8 +287,9 @@ class ActionAnalyzer:
             region_h, region_w = region.shape[:2]
             
             # Chips should be roughly circular (aspect ratio close to 1:1)
+            # Widened tolerance to allow for chips at angles or multiple chips
             aspect_ratio = region_w / region_h if region_h > 0 else 0
-            if not (0.7 < aspect_ratio < 1.4):  # Not circular enough
+            if not (0.5 < aspect_ratio < 2.5):  # More permissive for real-world chip images
                 print(f"  [FILTER] Rejected - bad aspect ratio: {aspect_ratio:.2f}")
                 return False
             
@@ -322,20 +330,30 @@ class ActionAnalyzer:
     def analyze_action(self, image_path):
         """
         Main analysis function that checks for poker actions in order:
-        1. Chips (betting/raising)
-        2. Hand tapping (checking) - CHECK HAND BEFORE FOLD
-        3. Folded cards (with confidence check)
-        
+        1. Folded cards (FOLD) - Check FIRST to prevent confusion with hands
+        2. Chips (BET/RAISE)
+        3. Hand (CHECK) - Check LAST as it's most prone to false positives
+
         Returns: dict with action type and details
         """
         result = {
             'action': None,
             'details': {}
         }
-        
-        # Step 1: Check for chips FIRST
+
+        # Step 1: Check for folded cards FIRST
+        # This prevents MediaPipe from detecting hands in folded card images
+        folded_cards, fold_confidence = self.check_folded_cards(image_path)
+
+        if folded_cards:
+            result['action'] = 'FOLD'
+            result['details']['folded_cards_detected'] = True
+            result['details']['fold_confidence'] = fold_confidence
+            return result
+
+        # Step 2: Check for chips SECOND
         chips_present, chip_labels = self.check_chips(image_path)
-        
+
         if chips_present:
             # If chips detected, analyze chip amounts
             chip_amounts = self.check_chip_amounts(image_path)
@@ -343,24 +361,15 @@ class ActionAnalyzer:
             result['details']['chips_detected'] = chip_labels
             result['details']['chip_amounts'] = list(chip_amounts) if chip_amounts else []
             return result
-        
-        # Step 2: Check for hand SECOND (before fold check)
-        # This prevents hands from being detected as folded cards
+
+        # Step 3: Check for hand LAST
+        # MediaPipe is prone to false positives, so check this last
         hand_present, hand_confidence = self.check_hand_present(image_path)
-        
+
         if hand_present:
             result['action'] = 'CHECK'
             result['details']['hand_detected'] = True
             result['details']['hand_confidence'] = hand_confidence
-            return result
-        
-        # Step 3: Check for folded cards THIRD
-        folded_cards, fold_confidence = self.check_folded_cards(image_path)
-        
-        if folded_cards:
-            result['action'] = 'FOLD'
-            result['details']['folded_cards_detected'] = True
-            result['details']['fold_confidence'] = fold_confidence
             return result
         
         # Step 4: Uncertain states
@@ -521,16 +530,19 @@ class ActionAnalyzer:
     
     def check_chip_amounts(self, image_path):
         """Check chip amounts in the image"""
+        if self.chip_amount_model is None:
+            return set()
+
         try:
             results = self.chip_amount_model(image_path, verbose=False)
-            
+
             detected_amounts = set()
             for result in results:
                 for box in result.boxes:
                     class_id = int(box.cls[0])
                     amount_label = result.names[class_id]
                     detected_amounts.add(amount_label)
-            
+
             return detected_amounts
         except Exception as e:
             print(f"[ERROR] Chip amount detection failed: {e}")
