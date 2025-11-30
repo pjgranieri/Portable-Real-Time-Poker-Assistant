@@ -11,11 +11,7 @@ _evaluator = Evaluator() if Evaluator is not None else None
 
 
 def _card_str_to_treys(card: str) -> int:
-    """Convert a card like 'HA', 'DK', 'C2' to a Treys int.
-
-    Accepts both rank-first and suit-first encodings used in the project.
-    Returns 0 if invalid or if Treys is unavailable.
-    """
+    """Convert a 2-char card like 'HA' or 'DK' to a Treys int."""
     if Card is None or not isinstance(card, str) or len(card) != 2:
         return 0
 
@@ -43,16 +39,7 @@ def _card_str_to_treys(card: str) -> int:
 
 
 def _evaluate_preflop_hand(hole_cards: List[str]) -> int:
-    """
-    Evaluate preflop hand strength and return bucket 0-4.
-    
-    Buckets:
-    0 = Trash (offsuit low cards, big gaps)
-    1 = Weak (small pairs, weak suited connectors, weak Ax)
-    2 = Medium (medium pairs, good suited connectors, good broadways)
-    3 = Strong (high pairs, premium suited cards, AK/AQ)
-    4 = Premium (AA, KK, QQ, AKs)
-    """
+    """Bucket preflop hand strength into 0-4."""
     if len(hole_cards) < 2:
         return 0
     
@@ -109,13 +96,14 @@ def _evaluate_preflop_hand(hole_cards: List[str]) -> int:
             return 2 if is_suited else 1
     
     # Ace with medium/low card
+    # NOTE: By request, **all offsuit Ax** are at least bucket 1 preflop.
     if high_rank == 12:  # Ax
         if low_rank >= 6:  # A9-AT (already handled above)
             return 2 if is_suited else 1
         elif low_rank >= 3:  # A5-A8
-            return 1 if is_suited else 0
+            return 1  # suited or offsuit: always at least weak playable
         else:  # A2-A4
-            return 1 if is_suited else 0  # Wheel potential
+            return 1  # suited or offsuit: wheel potential, but never pure trash
     
     # Suited connectors and gappers
     if is_suited:
@@ -149,11 +137,7 @@ def _evaluate_preflop_hand(hole_cards: List[str]) -> int:
 
 
 def evaluate_hand_features(hole_cards: List[str], board_cards: List[str]) -> Dict[str, Any]:
-    """Return coarse hand / draw features using Treys.
-
-    This is intentionally lightweight: we compute a single hand rank and
-    bucket it, plus simple draw / missed-draw booleans.
-    """
+    """Compute coarse Treys-based hand, draw, and board features."""
     if _evaluator is None or len(hole_cards) < 2:
         return {
             "hand_bucket": 0,
@@ -226,12 +210,85 @@ def evaluate_hand_features(hole_cards: List[str], board_cards: List[str]) -> Dic
         if rank_char in ranks:
             ranks_seen.add(ranks.index(rank_char))
 
-    has_flush_draw = any(v >= 4 for v in suits_count.values())
+    # Flush logic: distinguish made flush from draws and disable draws on river.
+    has_flush_draw = False
+    has_flush = False
 
+    # Count suits separately for hero and board to spot made flushes.
+    hero_suit_counts = {}
+    board_suit_counts = {}
+    for c in hero:
+        try:
+            s = Card.int_to_str(c)
+            suit_char = s[1]
+            hero_suit_counts[suit_char] = hero_suit_counts.get(suit_char, 0) + 1
+        except Exception:
+            continue
+    for c in board:
+        try:
+            s = Card.int_to_str(c)
+            suit_char = s[1]
+            board_suit_counts[suit_char] = board_suit_counts.get(suit_char, 0) + 1
+        except Exception:
+            continue
+
+    # Made flush: 5+ cards of same suit across hero+board.
+    for suit, total in suits_count.items():
+        if total >= 5:
+            has_flush = True
+            break
+
+    # Flush draw only exists before river and only if not already a flush.
+    if len(board) < 5 and not has_flush:
+        # 4 cards of a suit among hero+board where hero contributes at least one.
+        for suit, total in suits_count.items():
+            if total == 4:
+                hero_count = hero_suit_counts.get(suit, 0)
+                if hero_count >= 1:
+                    has_flush_draw = True
+                    break
+
+    # Detect *actual* straight draws.
+    # Stricter rule: only count windows of 4 distinct ranks spanning exactly
+    # 4 steps (e.g. 9-T-J-Q), where hero participates, and the board+hero
+    # do not already contain all 5 ranks of a made straight.
     sorted_ranks = sorted(ranks_seen)
     has_straight_draw = False
-    for i in range(len(sorted_ranks) - 2):
-        if sorted_ranks[i + 2] - sorted_ranks[i] <= 4:
+    if len(sorted_ranks) >= 3:
+        hero_ranks_only = set()
+        for c in hero:
+            try:
+                s = Card.int_to_str(c)
+                rc = s[0]
+                ranks = "23456789TJQKA"
+                if rc in ranks:
+                    hero_ranks_only.add(ranks.index(rc))
+            except Exception:
+                continue
+
+        distinct = sorted(set(sorted_ranks))
+        # Look at consecutive blocks of 4 distinct ranks.
+        for i in range(len(distinct) - 3):
+            low = distinct[i]
+            high = distinct[i + 3]
+            span = high - low
+            # We want exactly a 4-rank span (e.g. 6-7-8-9)
+            if span != 4:
+                continue
+
+            window_ranks = set(range(low, high + 1))
+
+            # Hero must participate in this potential straight window.
+            if not (hero_ranks_only & window_ranks):
+                continue
+
+            # If all 5 ranks of this window are already present among
+            # board+hero, Treys will already classify it as a made
+            # straight via the rank → bucket mapping, so we skip it
+            # as a "draw" case.
+            if window_ranks.issubset(distinct):
+                continue
+
             has_straight_draw = True
             break
 
