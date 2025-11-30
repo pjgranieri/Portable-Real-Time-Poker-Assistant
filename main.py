@@ -221,7 +221,7 @@ class MultiPlayerCVInputInterface:
         Process:
         1. Get full image from server
         2. Analyze FULL image with EnhancedActionAnalyzer
-        3. If BET/RAISE detected, analyze FULL image for chip count
+        3. If BET/RAISE detected, ALWAYS assume 1 chip ($5)
 
         Args:
             player_enum: Player enum (Player.PlayerOne, etc.)
@@ -255,26 +255,16 @@ class MultiPlayerCVInputInterface:
                 print(f"  [CV] Enhanced analyzer result: {action_type}")
                 print(f"  [CV] Details: {details}")
 
-                # STEP 2: If BET/RAISE, analyze FULL IMAGE for chips
+                # STEP 2: If BET/RAISE, ALWAYS assume 1 chip ($5)
                 if action_type == 'BET/RAISE':
-                    print(f"  [CV] BET/RAISE detected - waiting 5 seconds then analyzing chips...")
+                    print(f"  [CV] BET/RAISE detected - waiting 5 seconds...")
                     time.sleep(5)
 
-                    # Get new image for pot (player may have moved chips)
-                    try:
-                        pot_image_path = self.get_latest_image(timeout=60)
-                    except TimeoutError:
-                        print(f"  [WARNING] No new image for chips, using same image")
-                        pot_image_path = full_image_path
+                    # HARDCODED: Always 1 chip = $5
+                    chip_count = 1
+                    bet_amount = 5  # 1 chip * $5
 
-                    # Count chips on FULL IMAGE with ENHANCED counter
-                    print(f"  [CV] Analyzing FULL IMAGE with DetectionBasedChipCounter...")
-                    chip_result = self.chip_counter.count_chips(pot_image_path)
-                    chip_count = chip_result['count']
-                    bet_amount = chip_count * 5  # Each chip = $5
-
-                    print(f"  [CV] Chip analysis: {chip_count} chips = ${bet_amount}")
-                    print(f"  [CV] Method: {chip_result['method']}, Confidence: {chip_result['confidence']:.2f}")
+                    print(f"  [CV] Chip analysis: {chip_count} chip = ${bet_amount} (HARDCODED)")
 
                     # Determine if it's a call or raise
                     if bet_amount > call_value:
