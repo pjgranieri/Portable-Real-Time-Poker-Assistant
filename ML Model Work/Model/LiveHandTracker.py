@@ -24,12 +24,12 @@ except ImportError:
         def forward(self, *args, **kwargs):
             pass
 
-# Poker vocabulary
+# Basic model vocab
 STREET_VOCAB = ["preflop", "flop", "turn", "river"]
-POS_VOCAB = ["Early", "Late", "Blinds"]  # Model trained with 3 positions only
+POS_VOCAB = ["Early", "Late", "Blinds"]
 CLASSES = Cfg.classes
 
-# Position mapping
+# Position aliases from seats to buckets
 POS_ALIASES = {
     "SB": "Blinds", "BB": "Blinds",
     "UTG": "Early", "UTG1": "Early", "UTG+1": "Early",
@@ -38,7 +38,7 @@ POS_ALIASES = {
     "Early": "Early", "Late": "Late", "Blinds": "Blinds"
 }
 
-# Model paths 
+# Model artifact paths
 THIS_FILE = os.path.abspath(__file__)
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_FILE)))
 MODEL_DIR = os.path.join(REPO_ROOT, "runs", "poker_mlp_v1")
@@ -46,14 +46,13 @@ MODEL_PATH = os.path.join(MODEL_DIR, "model.best.pt")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.joblib")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
 
-# Card encoding
+# Card encoding tables
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
 CARD2IDX = {f"{r}{s}": i for i, (r, s) in enumerate((r, s) for r in RANKS for s in SUITS)}
 NUM_CARDS = 52
 
 def card_one_hot(card: str) -> np.ndarray:
-    """Convert card string to one-hot encoding. Handles formats: 'As', 'SA', 'HA', 'DK', etc."""
     v = np.zeros(NUM_CARDS, dtype=np.float32)
     if not isinstance(card, str) or len(card) != 2:
         return v
@@ -96,7 +95,7 @@ class LiveHandTracker:
         self.bb_size = big_blind_size
         self.my_pos = canonicalize_position(my_position)
         
-        # Game state
+        # Live hand state
         self.hole_cards = []
         self.board_cards = []
         self.current_street = "preflop"
@@ -105,7 +104,7 @@ class LiveHandTracker:
         self.my_player_name = "PlayerCoach"
         self.was_pfr_live = False
         
-        # Load model metadata
+        # Load metadata, model, and scaler
         try:
             import json
             with open(META_PATH, 'r') as f:
@@ -170,18 +169,17 @@ class LiveHandTracker:
         self.was_pfr_live = False
 
     def update_state_from_cv(self, raw_cv_data: Dict[str, Any]):
-        """Update internal state from CV data"""
         self.hole_cards = raw_cv_data.get('hole_cards', [])
         self.board_cards = raw_cv_data.get('board_cards', [])
         self.cv_data = raw_cv_data
         self.action_history = raw_cv_data.get('action_sequence', [])
         
-        # Calculate multiplayer features from JSON data
+        # Multiplayer features from JSON
         players_remaining = raw_cv_data.get('players_remaining', 2)
         self.cv_data['num_active_players'] = players_remaining
         self.cv_data['multiway_pot_flag'] = 1 if players_remaining >= 3 else 0
         
-        # Calculate position_relative (0.0 = first to act, 1.0 = last to act)
+        # Relative position: 0 = first, 1 = last
         dealer_pos = raw_cv_data.get('dealer_position', 0)
         player_id = raw_cv_data.get('player_id', 0)
         if players_remaining > 1:
@@ -190,7 +188,7 @@ class LiveHandTracker:
         else:
             self.cv_data['position_relative'] = 0.5
         
-        # Count callers and raisers on current street from action history
+        # Callers and raisers on current street
         current_street_actions = [a for a in self.action_history 
                                   if a.get('street', 'preflop') == self.current_street]
         self.cv_data['num_callers_this_street'] = sum(1 for a in current_street_actions 
@@ -198,21 +196,18 @@ class LiveHandTracker:
         self.cv_data['num_raisers_this_street'] = sum(1 for a in current_street_actions 
                                                         if a.get('action') == 'raise')
         
-        # Average opponent stack already calculated in main()
+        # Fallback average opponent stack
         if 'avg_opp_stack_bb' not in self.cv_data:
             self.cv_data['avg_opp_stack_bb'] = raw_cv_data.get('opp_stack_chips', 100.0)
     
     def _calculate_was_pfr(self) -> int:
-        """Check if player was preflop raiser"""
         return 1 if self.was_pfr_live else 0
 
     def _calculate_raises_preflop(self) -> int:
-        """Count number of raises preflop"""
         pre_hist = [a for a in self.action_history if a.get('street', 'preflop') == 'preflop']
         return sum(1 for a in pre_hist if a.get('action') == 'raise')
 
     def _calculate_pot_type(self) -> str:
-        """Determine pot type based on preflop action"""
         raises_preflop = self._calculate_raises_preflop()
         if raises_preflop == 0:
             return 'limped'
@@ -224,12 +219,10 @@ class LiveHandTracker:
             return 'other'
 
     def _calculate_raises_this_street(self) -> int:
-        """Count raises on current street"""
         street_hist = [a for a in self.action_history if a.get('street') == self.current_street]
         return sum(1 for a in street_hist if a.get('action') == 'raise')
 
     def _calculate_in_position(self) -> int:
-        """Determine positional advantage (heads-up)"""
         is_btn = (self.my_pos in ["BTN", "Late"] or self.my_pos == "SB")
         
         if self.current_street == 'preflop':
@@ -238,7 +231,6 @@ class LiveHandTracker:
             return 1 if is_btn else 0
 
     def _calculate_board_texture(self) -> str:
-        """Calculate board texture using Treys features"""
         feats = evaluate_hand_features(self.hole_cards, self.board_cards)
         has_draw = feats["has_flush_draw"] or feats["has_straight_draw"]
         if has_draw or feats["hand_bucket"] >= 2.0:
@@ -246,7 +238,7 @@ class LiveHandTracker:
         return "dry"
 
     def get_static_vector(self) -> torch.Tensor:
-        # Build one-hot encoded cards + street + position
+        # One-hot encode cards, street, and position
         h1 = self.hole_cards[0] if len(self.hole_cards) > 0 else ""
         h2 = self.hole_cards[1] if len(self.hole_cards) > 1 else ""
         
@@ -269,33 +261,33 @@ class LiveHandTracker:
         return torch.tensor(static_features, dtype=torch.float32).unsqueeze(0)
 
     def get_numeric_vector(self) -> np.ndarray:
-        # Get raw CV values
+        # Raw CV values
         pot_chips = self.cv_data.get('pot_chips', 0.0)
         to_call_chips = self.cv_data.get('to_call_chips', 0.0)
         stack_chips = self.cv_data.get('my_stack_chips', 0.0)
         opp_stack_chips = self.cv_data.get('opp_stack_chips', 0.0)
         last_bet_chips = self.cv_data.get('last_bet_size_chips', 0.0)
 
-        # Calculate base money features (in big blinds)
+        # Base money features (in big blinds)
         pot_bb = pot_chips / self.bb_size
         to_call_bb = to_call_chips / self.bb_size
         stack_bb = stack_chips / self.bb_size
         opp_stack_bb = opp_stack_chips / self.bb_size
         last_bet_bb = last_bet_chips / self.bb_size
 
-        # Calculate bet sizing as fraction of pot
+        # Bet sizing as fraction of pot
         pot_before_bet = pot_chips - last_bet_chips
         pot_bb_before = pot_before_bet / self.bb_size if self.bb_size > 0 else 0.0
         raise_size_bb = last_bet_bb if to_call_bb > 1e-9 else max(0.0, last_bet_bb - to_call_bb)
         bet_frac_of_pot = raise_size_bb / pot_bb_before if pot_bb_before > 1e-9 else 0.0
         
-        # Calculate position and game state features
+        # Position and game state features
         street_index = STREET_VOCAB.index(self.current_street)
         in_position = self._calculate_in_position()
         was_pfr = self._calculate_was_pfr()
         raises_this_street = self._calculate_raises_this_street()
 
-        # Calculate board texture using Treys
+        # Board texture using Treys
         board_texture_str = self._calculate_board_texture()
         board_texture_dry = 1.0 if board_texture_str == "dry" else 0.0
         board_texture_wet = 1.0 if board_texture_str == "wet" else 0.0
@@ -308,13 +300,13 @@ class LiveHandTracker:
         has_combo_draw = treys_feats["has_combo_draw"]
         is_missed_draw_river = treys_feats["is_missed_draw_river"]
         
-        # Calculate pot type
+        # Pot type flags
         pot_type_str = self._calculate_pot_type()
         pot_type_limped = 1.0 if pot_type_str == "limped" else 0.0
         pot_type_single_raised = 1.0 if pot_type_str == "single_raised" else 0.0
         pot_type_three_bet = 1.0 if pot_type_str == "three_bet" else 0.0
         
-        # Multi-player features (calculated from JSON in update_state_from_cv)
+        # Multi-player features from JSON
         num_active_players = self.cv_data.get('num_active_players', 2)
         num_players_to_act = 0  # Not available in current JSON format, default to 0
         multiway_pot_flag = self.cv_data.get('multiway_pot_flag', 0)
@@ -323,7 +315,7 @@ class LiveHandTracker:
         num_raisers_this_street = self.cv_data.get('num_raisers_this_street', 0)
         avg_opp_stack_bb = self.cv_data.get('avg_opp_stack_bb', opp_stack_bb)
         
-        # Assemble feature map (MUST match training exactly)
+        # Assemble feature map for model
         feature_map = {
             # Core money features (6)
             "pot_bb": pot_bb,
@@ -365,7 +357,7 @@ class LiveHandTracker:
 
         return np.array(numeric_feature_vector, dtype=np.float32).reshape(1, -1)
 
-    def predict_action(self) -> Tuple[str, Dict[str, float]]:
+    def predict_action(self) -> Tuple[str, Dict[str, float], float]:
         """Get model prediction with Treys-based aggression adjustments"""
         print(f"--- Predicting for {self.my_pos} on {self.current_street} ---")
         
@@ -395,7 +387,7 @@ class LiveHandTracker:
         static_vec = self.get_static_vector()
         numeric_tensor = torch.tensor(numeric_vec_scaled, dtype=torch.float32)
         
-        # Get model prediction
+        # Forward pass through model
         with torch.no_grad():
             logits = self.model(static_vec, numeric_tensor)
         
@@ -406,34 +398,31 @@ class LiveHandTracker:
         except Exception:
             to_call_bb_val = 0.0
         
-        # Apply action masking BEFORE temperature scaling
-        # This ensures the model never predicts illegal moves
+        # Mask illegal actions before temperature scaling
         facing_bet = to_call_bb_val > 0.01
         
-        # Create mask: [fold, check, call, raise]
-        # When facing bet (to_call > 0): fold, call, raise legal (NOT check)
-        # When no bet (to_call == 0): check, raise legal (NOT fold or call)
+        # Create mask for legal moves [fold, check, call, raise]
         action_mask = torch.ones(4, dtype=torch.bool)
         if facing_bet:
-            # Facing bet: can fold, call, or raise (NOT check)
-            action_mask[CLASSES.index('check')] = False  # check illegal when facing bet
+            # Facing bet: disable check
+            action_mask[CLASSES.index('check')] = False
         else:
-            # No bet: can check or raise (NOT fold or call)
-            action_mask[CLASSES.index('fold')] = False   # fold illegal when no bet (pointless)
-            action_mask[CLASSES.index('call')] = False   # call illegal when no bet (nothing to call)
+            # No bet: disable fold and call
+            action_mask[CLASSES.index('fold')] = False
+            action_mask[CLASSES.index('call')] = False
         
-        # Apply mask to logits (set illegal actions to very negative value)
+        # Apply mask by heavily penalizing illegal logits
         logits_masked = logits.clone()
         # Use -100 instead of -1e9 to avoid numerical instability
         logits_masked[0, ~action_mask] = -100.0
         
-        # Define allowed actions list based on the mask
+        # Allowed actions list from mask
         if facing_bet:
             allowed_actions = ['fold', 'call', 'raise']
         else:
             allowed_actions = ['check', 'raise']
         
-        # Apply logit biases AFTER masking
+        # Logit biases after masking
         call_idx = CLASSES.index("call")
         logits_masked[0, call_idx] = logits_masked[0, call_idx] + Cfg.call_logit_bias
         
@@ -443,40 +432,145 @@ class LiveHandTracker:
                     idx = CLASSES.index(cls_name)
                     logits_masked[0, idx] = logits_masked[0, idx] + float(bias)
 
-        # Temperature scaling and softmax on masked logits
+        # Temperature scaling and softmax
         probs = torch.softmax(logits_masked / self.learned_temperature, dim=1).squeeze()
 
-        # Treys features (evaluated once per decision) for debug + heuristics
+        # Live Treys features for debug and heuristics
         treys_feats_live = evaluate_hand_features(self.hole_cards, self.board_cards)
         hand_bucket = treys_feats_live["hand_bucket"]
         has_flush_draw = treys_feats_live["has_flush_draw"]
         has_straight_draw = treys_feats_live["has_straight_draw"]
+        is_missed_draw_river = treys_feats_live.get("is_missed_draw_river", 0.0)
         board_has_pair = treys_feats_live.get("board_has_pair", 0.0)
         board_is_monotone = treys_feats_live.get("board_is_monotone", 0.0)
         board_is_connected = treys_feats_live.get("board_is_connected", 0.0)
         
-        # DEBUG: Show hand evaluation
+        # DEBUG: Hand evaluation
         print(f"DEBUG: Hand={self.hole_cards}, Board={self.board_cards}, Bucket={hand_bucket:.2f}, FD={has_flush_draw}, SD={has_straight_draw}")
         if board_has_pair > 0.5 or board_is_monotone > 0.5 or board_is_connected > 0.5:
-            print(f"  ⚠️  DANGEROUS BOARD: Paired={board_has_pair}, Monotone={board_is_monotone}, Connected={board_is_connected}")
+            print(f"DANGEROUS BOARD: Paired={board_has_pair}, Monotone={board_is_monotone}, Connected={board_is_connected}")
 
-        # === ACTIVE HEURISTICS (OUTSIDE COMMENTED BLOCK) ===
+        # === Active heuristics ===
         probs_adjusted = probs.clone()
         
-        # Get street and pot info for heuristics
+        # Street and pot info for heuristics
         try:
             idx_street = self.numeric_cols_order.index('street_index')
             idx_pot = self.numeric_cols_order.index('pot_bb')
             idx_to_call = self.numeric_cols_order.index('to_call_bb')
+            idx_raises = self.numeric_cols_order.index('raises_this_street')
+            idx_num_raisers = self.numeric_cols_order.index('num_raisers_this_street')
+            idx_multiway = self.numeric_cols_order.index('multiway_pot_flag')
             street_idx = int(numeric_vec_unscaled[0, idx_street])
             pot_bb_val = float(numeric_vec_unscaled[0, idx_pot])
             to_call_bb_val = float(numeric_vec_unscaled[0, idx_to_call])
+            raises_this_street = float(numeric_vec_unscaled[0, idx_raises])
+            num_raisers_this_street = float(numeric_vec_unscaled[0, idx_num_raisers])
+            multiway_pot_flag = float(numeric_vec_unscaled[0, idx_multiway])
         except (ValueError, IndexError):
             street_idx = 0
             pot_bb_val = 0.0
             to_call_bb_val = 0.0
+            raises_this_street = 0.0
+            num_raisers_this_street = 0.0
+            multiway_pot_flag = 0.0
+
+        # PRE-FLOP AGGRESSION, RANGE & SHORT-STACK LOGIC (STRONG OVERRIDES)
+        if street_idx == 0:
+            strong_preflop = hand_bucket >= 3.0
+            premium_preflop = hand_bucket >= 3.5
+            # Buckets 2.0–3.0: good-but-not-nutty value hands (pairs, big broadways)
+            value_preflop = 2.0 <= hand_bucket < 3.0
+            # Buckets ≥1.0: playable speculative hands (suited connectors/gappers, weak Ax/Kx)
+            playable_spec = hand_bucket >= 1.0
+
+            short_stack = False
+            num_active_players = self.cv_data.get('num_active_players', 2)
+            multiway_pot_flag = self.cv_data.get('multiway_pot_flag', 0)
+            try:
+                idx_stack = self.numeric_cols_order.index('stack_bb')
+                stack_bb_val = float(numeric_vec_unscaled[0, idx_stack])
+                short_stack = stack_bb_val <= 10.0
+            except (ValueError, IndexError):
+                stack_bb_val = 0.0
+
+            # Treat blinds as "facing a small bet" preflop; still allow strong opens
+            # FORCE-RAISE only with strong hands (3.0+) when cost is small (<= 2BB)
+            if to_call_bb_val <= 2.0 and strong_preflop:
+                p_fold = probs_adjusted[CLASSES.index('fold')]
+                p_call = probs_adjusted[CLASSES.index('call')]
+                p_check = probs_adjusted[CLASSES.index('check')]
+                # Collapse most non-raise mass into raise
+                new_raise = 0.75
+                probs_adjusted[CLASSES.index('raise')] = new_raise
+                # Leftover distributed between fold/call/check but small
+                leftover = 1.0 - new_raise
+                probs_adjusted[CLASSES.index('call')] = min(p_call, leftover * 0.5)
+                probs_adjusted[CLASSES.index('check')] = min(p_check, leftover * 0.3)
+                probs_adjusted[CLASSES.index('fold')] = max(0.0, 1.0 - probs_adjusted.sum())
+
+            # Late-position / blinds widen range aggressively for playable speculative hands
+            if self.my_pos in ("Late", "Blinds") and playable_spec and to_call_bb_val <= 1.5:
+                # Cap fold probability so we don't just muck everything reasonable
+                max_fold = 0.25
+                cur_fold = probs_adjusted[CLASSES.index('fold')].item()
+                if cur_fold > max_fold:
+                    reduce = cur_fold - max_fold
+                    probs_adjusted[CLASSES.index('fold')] = max_fold
+                    probs_adjusted[CLASSES.index('call')] += reduce * 0.8
+                    probs_adjusted[CLASSES.index('raise')] += reduce * 0.2
+
+                # In heads-up/single-raised pots, give these hands real raising weight
+                if num_active_players <= 3 and multiway_pot_flag == 0 and to_call_bb_val <= 1.0:
+                    p_call = probs_adjusted[CLASSES.index('call')]
+                    # Shift half of call into raise when we actually like the hand
+                    shift = p_call * 0.5
+                    probs_adjusted[CLASSES.index('raise')] += shift
+                    probs_adjusted[CLASSES.index('call')] = p_call - shift
+
+            # Short-stack shove/fold bias
+            if short_stack:
+                # Ultra short-stack zone (true push/fold): be willing to jam
+                # a lot of hands instead of nit-folding.
+                if stack_bb_val <= 4.0 and to_call_bb_val > 0:
+                    if hand_bucket >= 1.0:
+                        # Treat as shove/fold: push most non-fold mass into raise.
+                        p_fold = probs_adjusted[CLASSES.index('fold')].item()
+                        p_call = probs_adjusted[CLASSES.index('call')].item()
+                        p_check = probs_adjusted[CLASSES.index('check')].item()
+                        total_non_fold = p_call + p_check
+                        if total_non_fold > 0.0:
+                            shift = total_non_fold * 0.75
+                            probs_adjusted[CLASSES.index('raise')] += shift
+                            probs_adjusted[CLASSES.index('call')] = p_call * 0.25
+                            probs_adjusted[CLASSES.index('check')] = p_check * 0.25
+                    else:
+                        # True trash in all-in zone: still allow folding, but
+                        # don't over-kill speculative calls.
+                        if hand_bucket < 0.5 and to_call_bb_val > 0.5:
+                            p_call = probs_adjusted[CLASSES.index('call')].item()
+                            if p_call > 0.10:
+                                shift = p_call * 0.60
+                                probs_adjusted[CLASSES.index('fold')] += shift
+                                probs_adjusted[CLASSES.index('call')] = p_call - shift
+                else:
+                    # Non-ultra-short stacks: keep original behavior but only
+                    # punish true trash, not all weak hands.
+                    if strong_preflop and to_call_bb_val <= stack_bb_val:
+                        p_call = probs_adjusted[CLASSES.index('call')].item()
+                        p_check = probs_adjusted[CLASSES.index('check')].item()
+                        boost = 0.80 * (p_call + p_check)
+                        probs_adjusted[CLASSES.index('raise')] += boost
+                        probs_adjusted[CLASSES.index('call')] = p_call * 0.20
+                        probs_adjusted[CLASSES.index('check')] = p_check * 0.20
+                    elif hand_bucket < 0.5 and to_call_bb_val > 0.5:
+                        p_call = probs_adjusted[CLASSES.index('call')].item()
+                        if p_call > 0.05:
+                            shift = p_call * 0.85
+                            probs_adjusted[CLASSES.index('fold')] += shift
+                            probs_adjusted[CLASSES.index('call')] = p_call - shift
         
-        # POCKET PAIR DEFENSE - Never fold pocket pairs to single blind preflop
+        # Pocket pair defense: don't fold to single blind
         if street_idx == 0 and len(self.hole_cards) == 2 and to_call_bb_val <= 1.5:
             ranks_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
             try:
@@ -493,22 +587,22 @@ class LiveHandTracker:
                         shift = p_fold * 0.80
                         probs_adjusted[CLASSES.index('call')] += shift
                         probs_adjusted[CLASSES.index('fold')] = p_fold * 0.20
-                        print(f"🎲 POCKET PAIR DEFENSE: Calling with {card1}{card2} (never fold pairs to single blind)")
+                        print(f"POCKET PAIR DEFENSE: Calling with {card1}{card2} (never fold pairs to single blind)")
             except (IndexError, KeyError):
                 pass
         
-        # BLUFF CONTROL - Kill bluffing with complete air (bucket < 0.5)
+        # Bluff control: kill bluffs only with pure air
         if to_call_bb_val <= 1e-6 and street_idx >= 1:  # First to act postflop
-            if hand_bucket < 0.5:  # Complete air
+            has_draw = bool(treys_feats_live.get("has_flush_draw", 0.0) or treys_feats_live.get("has_straight_draw", 0.0))
+            if hand_bucket <= 0.0 and not has_draw:  # Complete air, no equity
                 p_raise = probs_adjusted[CLASSES.index('raise')].item()
                 if p_raise > 0.30:
-                    # Shift 70% of raise probability to check
                     shift = p_raise * 0.70
                     probs_adjusted[CLASSES.index('check')] += shift
                     probs_adjusted[CLASSES.index('raise')] = p_raise * 0.30
-                    print(f"🛑 BLUFF CONTROL: Checking with air (bucket={hand_bucket:.1f})")
+                    print(f"BLUFF CONTROL: Checking with pure air (bucket={hand_bucket:.1f})")
         
-        # VALUE EXTRACTION - Force betting/raising with strong hands (straights+)
+        # Value extraction: bet/raise strong postflop hands
         if street_idx >= 1 and hand_bucket >= 3.0:  # Postflop with strong+ hand
             if to_call_bb_val <= 1e-6:  # First to act - bet instead of checking
                 p_check = probs_adjusted[CLASSES.index('check')].item()
@@ -516,7 +610,7 @@ class LiveHandTracker:
                     shift = p_check * 0.60  # Shift 60% of checks to raises
                     probs_adjusted[CLASSES.index('raise')] += shift
                     probs_adjusted[CLASSES.index('check')] = p_check * 0.40
-                    print(f"💰 VALUE BET: Strong hand (bucket={hand_bucket:.1f}) - betting")
+                    print(f"VALUE BET: Strong hand (bucket={hand_bucket:.1f}) - betting")
             else:  # Facing a bet - raise for value
                 p_call = probs_adjusted[CLASSES.index('call')].item()
                 p_raise = probs_adjusted[CLASSES.index('raise')].item()
@@ -525,9 +619,9 @@ class LiveHandTracker:
                     shift = p_call * 0.50  # Shift 50% of calls to raises
                     probs_adjusted[CLASSES.index('raise')] += shift
                     probs_adjusted[CLASSES.index('call')] = p_call * 0.50
-                    print(f"💰 VALUE RAISE: Strong hand (bucket={hand_bucket:.1f}) - raising for value")
+                    print(f"VALUE RAISE: Strong hand (bucket={hand_bucket:.1f}) - raising for value")
         
-        # RIVER PROTECTION - Don't hero call with marginal hands
+        # River protection: avoid hero calls with marginal hands
         if street_idx == 3 and to_call_bb_val > 0:  # River facing bet
             if hand_bucket < 2.0:  # Marginal or worse
                 try:
@@ -543,367 +637,310 @@ class LiveHandTracker:
                             probs_adjusted[CLASSES.index('fold')] += shift
                             probs_adjusted[CLASSES.index('call')] = p_call * 0.20
                             probs_adjusted[CLASSES.index('raise')] = p_raise * 0.05
-                            print(f"🛡️ RIVER PROTECTION: Folding marginal hand (bucket={hand_bucket:.1f})")
+                            print(f"RIVER PROTECTION: Folding marginal hand (bucket={hand_bucket:.1f})")
                 except (ValueError, IndexError):
                     pass
-        
-        # Apply adjusted probabilities
-        probs = probs_adjusted
 
-        # === TREYS-BASED DYNAMIC AGGRESSION ===
-        # DISABLED: Model base predictions are too aggressive, heuristics make it worse
-        # The entire aggression/defensive folding block is commented out
-        # To re-enable, uncomment the code block below and fix indentation
-        """
-        if True:  # Set to False to disable aggression heuristics
+        # Flop/turn discipline vs big bets and scary boards
+        if street_idx in (1, 2) and to_call_bb_val > 0:
             try:
-                idx_street = self.numeric_cols_order.index('street_index')
-                idx_pot = self.numeric_cols_order.index('pot_bb')
-                street_idx = int(numeric_vec_unscaled[0, idx_street])
-                pot_bb = float(numeric_vec_unscaled[0, idx_pot])
-                
-                probs_adjusted = probs.clone()
-                
-                # === PREFLOP AGGRESSION ===
-                if street_idx == 0 and len(self.hole_cards) == 2:
-                    ranks_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
-                    try:
-                        card1, card2 = self.hole_cards[0], self.hole_cards[1]
-                        rank1 = ranks_map.get(card1[1] if card1[0] in 'CDHS' else card1[0], 0)
-                        rank2 = ranks_map.get(card2[1] if card2[0] in 'CDHS' else card2[0], 0)
-                        
-                        is_pocket_pair = (rank1 == rank2)
-                        is_high_pair = is_pocket_pair and rank1 >= 10  # TT+
-                        is_premium_pair = is_pocket_pair and rank1 >= 12  # QQ+
-                        is_broadway = (rank1 >= 10 and rank2 >= 10)
-                        
-                        # POCKET PAIR DEFENSE - Never fold pocket pairs to single blind
-                        if is_pocket_pair and to_call_bb_val <= 1.5:
-                            p_fold = probs_adjusted[CLASSES.index('fold')].item()
-                            if p_fold > 0.30:
-                                # Shift fold to call for pocket pairs
-                                shift = p_fold * 0.80
-                                probs_adjusted[CLASSES.index('call')] += shift
-                                probs_adjusted[CLASSES.index('fold')] = p_fold * 0.20
-                                print(f"🎲 POCKET PAIR DEFENSE: Calling with {card1}{card2} (never fold pairs to single blind)")
-                        
-                        # ULTRA AGGRESSIVE with premium hands preflop
-                        if to_call_bb_val <= 1e-6:  # First to act
-                            p_check = probs_adjusted[CLASSES.index('check')].item()
-                            
-                            if is_premium_pair:  # QQ, KK, AA
-                                if p_check > 0.05:
-                                    boost = p_check * 0.95
-                                    probs_adjusted[CLASSES.index('raise')] += boost
-                                    probs_adjusted[CLASSES.index('check')] -= boost
-                                    print(f"DEBUG: ULTRA AGGRO PREFLOP - premium pair {card1}{card2}")
-                            elif is_high_pair:  # TT, JJ
-                            if p_check > 0.10:
-                                boost = p_check * 0.90
-                                probs_adjusted[CLASSES.index('raise')] += boost
-                                probs_adjusted[CLASSES.index('check')] -= boost
-                                print(f"DEBUG: AGGRO PREFLOP - high pair {card1}{card2}")
-                        elif (rank1 == 14 or rank2 == 14) and max(rank1, rank2) >= 11:  # AK, AQ, AJ
-                            if p_check > 0.15:
-                                boost = p_check * 0.85
-                                probs_adjusted[CLASSES.index('raise')] += boost
-                                probs_adjusted[CLASSES.index('check')] -= boost
-                                print(f"DEBUG: AGGRO PREFLOP - ace high {card1}{card2}")
-                        elif is_broadway:
-                            if p_check > 0.25:
-                                boost = p_check * 0.60
-                                probs_adjusted[CLASSES.index('raise')] += boost
-                                probs_adjusted[CLASSES.index('check')] -= boost
-                    
-                    # AGGRESSIVE 3-bet with premium hands
-                    elif to_call_bb_val > 0 and to_call_bb_val <= 3.5:
-                        p_call = probs_adjusted[CLASSES.index('call')].item()
-                        
-                        if is_premium_pair:  # QQ, KK, AA
-                            if p_call > 0.30:
-                                boost = p_call * 0.70
-                                probs_adjusted[CLASSES.index('raise')] += boost
-                                probs_adjusted[CLASSES.index('call')] -= boost
-                                print(f"DEBUG: ULTRA AGGRO PREFLOP - 3bet premium {card1}{card2}")
-                        elif is_high_pair or (rank1 == 14 and rank2 >= 13):  # TT+, AK
-                            if p_call > 0.40:
-                                boost = p_call * 0.50
-                                probs_adjusted[CLASSES.index('raise')] += boost
-                                probs_adjusted[CLASSES.index('call')] -= boost
-                                print(f"DEBUG: AGGRO PREFLOP - 3bet strong {card1}{card2}")
-                except:
-                    pass
-            
-            # === POSTFLOP AGGRESSION - First to Act ===
-            if to_call_bb_val <= 1e-6 and street_idx >= 1:
-                p_check = probs_adjusted[CLASSES.index('check')].item()
+                idx_bet_frac = self.numeric_cols_order.index('bet_frac_of_pot')
+                bet_frac = float(numeric_vec_unscaled[0, idx_bet_frac])
+            except (ValueError, IndexError):
+                bet_frac = 0.0
+
+            has_draw = bool(treys_feats_live.get("has_flush_draw", 0.0) or treys_feats_live.get("has_straight_draw", 0.0))
+            weak_hand = hand_bucket < 2.0
+            # Treat anything below ~3.5 as non-nut for pot-control on scary boards
+            medium_hand = hand_bucket < 3.5
+            dangerous_board = (board_has_pair > 0.5) or (board_is_monotone > 0.5) or (board_is_connected > 0.5)
+
+            # Weak no-draw hands vs medium+ bets: fold earlier
+            if weak_hand and not has_draw and bet_frac >= 0.5:
+                p_call = probs_adjusted[CLASSES.index('call')].item()
                 p_raise = probs_adjusted[CLASSES.index('raise')].item()
-                
-                if hand_bucket >= 3.5:  # Nutted
-                    if p_check > 0.10:
-                        boost = p_check * 0.95
-                        probs_adjusted[CLASSES.index('raise')] += boost
-                        probs_adjusted[CLASSES.index('check')] -= boost
-                        print(f"DEBUG: ULTRA AGGRO - nutted (bucket={hand_bucket:.1f})")
-                elif hand_bucket >= 2.5:  # Strong
-                    if p_check > 0.30:
-                        boost = p_check * 0.80
-                        probs_adjusted[CLASSES.index('raise')] += boost
-                        probs_adjusted[CLASSES.index('check')] -= boost
-                        print(f"DEBUG: AGGRO - strong (bucket={hand_bucket:.1f})")
-                elif hand_bucket >= 1.5:  # Medium
-                    if pot_bb <= 12.0 and p_check > 0.50:
-                        boost = p_check * 0.50
-                        probs_adjusted[CLASSES.index('raise')] += boost
-                        probs_adjusted[CLASSES.index('check')] -= boost
-                        print(f"DEBUG: AGGRO - medium (bucket={hand_bucket:.1f})")
-                elif hand_bucket < 0.5:  # Complete air - KILL BLUFFING
-                    if p_raise > 0.30:
-                        # Shift raise to check when we have nothing
-                        shift = p_raise * 0.70
-                        probs_adjusted[CLASSES.index('check')] += shift
-                        probs_adjusted[CLASSES.index('raise')] = p_raise * 0.30
-                        print(f"🛑 BLUFF CONTROL: Checking with air (bucket={hand_bucket:.1f}) - no bluffing")
-                
-                # PREMIUM HAND VALUE EXTRACTION on safe boards
-                # Force betting with AA/KK on non-scary boards
-                if hand_bucket >= 3.5 and p_check > 0.60:
-                    # Check if board is relatively safe (not paired, not monotone)
-                    if board_has_pair < 0.5 and board_is_monotone < 0.5:
-                        # Force bet with premium on safe board
-                        shift = p_check * 0.75
-                        probs_adjusted[CLASSES.index('raise')] += shift
-                        probs_adjusted[CLASSES.index('check')] = p_check * 0.25
-                        print(f"💰 VALUE BET: Premium hand (bucket={hand_bucket:.1f}) on safe board - extracting value")
-                
-                elif hand_bucket >= 0.5:  # Draws
-                    if (has_flush_draw or has_straight_draw) and pot_bb >= 1.5 and p_check > 0.50:
-                        boost = p_check * 0.55
-                        probs_adjusted[CLASSES.index('raise')] += boost
-                        probs_adjusted[CLASSES.index('check')] -= boost
-                        print(f"DEBUG: AGGRO - semi-bluff (bucket={hand_bucket:.1f})")
-            
-            # === POSTFLOP AGGRESSION - Facing Bets ===
-            # CRITICAL: Don't apply any aggression boosts if we have garbage and face a raise
-            if to_call_bb_val > 0 and street_idx >= 1 and hand_bucket >= 1.0:
+                if p_call + p_raise > 0.05:
+                    shift = 0.85 * (p_call + p_raise)
+                    probs_adjusted[CLASSES.index('fold')] += shift
+                    probs_adjusted[CLASSES.index('call')] = p_call * 0.15
+                    probs_adjusted[CLASSES.index('raise')] = p_raise * 0.15
+
+            # Medium hands on scary boards: call/fold, avoid raising
+            if medium_hand and dangerous_board and bet_frac >= 0.5:
+                p_raise = probs_adjusted[CLASSES.index('raise')].item()
+                p_call = probs_adjusted[CLASSES.index('call')].item()
+                if p_raise > 0.01:
+                    # No raising here: all raise mass goes to call/fold
+                    shift_to_call = p_raise * (0.60 if bet_frac < 0.9 else 0.40)
+                    shift_to_fold = p_raise - shift_to_call
+                    probs_adjusted[CLASSES.index('call')] += shift_to_call
+                    probs_adjusted[CLASSES.index('fold')] += shift_to_fold
+                    probs_adjusted[CLASSES.index('raise')] = 0.0
+
+        # Protect strong draws when price is reasonable
+        if street_idx in (1, 2) and to_call_bb_val > 0:
+            has_flush_draw_live = treys_feats_live.get("has_flush_draw", 0.0) > 0.5
+            has_straight_draw_live = treys_feats_live.get("has_straight_draw", 0.0) > 0.5
+            if (has_flush_draw_live or has_straight_draw_live) and hand_bucket >= 0.5:
                 try:
                     idx_bet_frac = self.numeric_cols_order.index('bet_frac_of_pot')
                     bet_frac = float(numeric_vec_unscaled[0, idx_bet_frac])
-                except:
+                except (ValueError, IndexError):
                     bet_frac = 0.0
-                
-                if bet_frac <= 0.75:
+
+                # Reasonable price: cap fold, favour call/raise
+                if bet_frac <= 0.7:
                     p_fold = probs_adjusted[CLASSES.index('fold')].item()
-                    p_call = probs_adjusted[CLASSES.index('call')].item()
-                    
-                    if hand_bucket >= 3.5:  # Nutted
-                        if p_fold > 0.01:
-                            boost_from_fold = p_fold * 0.98
-                            probs_adjusted[CLASSES.index('raise')] += boost_from_fold * 0.8
-                            probs_adjusted[CLASSES.index('call')] += boost_from_fold * 0.2
-                            probs_adjusted[CLASSES.index('fold')] -= boost_from_fold
-                        # Reduced aggression: only convert 30% of call to raise (was 70%)
-                        if p_call > 0.40:
-                            boost = p_call * 0.30
-                            probs_adjusted[CLASSES.index('raise')] += boost
-                            probs_adjusted[CLASSES.index('call')] -= boost
-                            print(f"DEBUG: MODERATE AGGRO - nutted defend (bucket={hand_bucket:.1f})")
-                    elif hand_bucket >= 2.5:  # Strong
-                        # Favor calling with strong hands - trust the model's predictions
-                        if p_fold > 0.10 and bet_frac <= 0.70:
-                            boost = p_fold * 0.85
-                            probs_adjusted[CLASSES.index('call')] += boost * 0.8
-                            probs_adjusted[CLASSES.index('raise')] += boost * 0.2
-                            probs_adjusted[CLASSES.index('fold')] -= boost
-                            print(f"DEBUG: CALL FAVORED - strong defend (bucket={hand_bucket:.1f})")
-                    elif hand_bucket >= 1.5:  # Medium
-                        if p_fold > p_call and bet_frac <= 0.60:
-                            boost = (p_fold - p_call) * 0.65
-                            probs_adjusted[CLASSES.index('call')] += boost
-                            probs_adjusted[CLASSES.index('fold')] -= boost
-                            print(f"DEBUG: CALL - medium defend (bucket={hand_bucket:.1f})")
-            
-            # === PAIRED BOARD DEFENSE (TONED DOWN) ===
-            # Paired boards are dangerous but don't fold everything
-            if board_has_pair > 0.5 and street_idx >= 1:  # Postflop with paired board
-                p_call = probs_adjusted[CLASSES.index('call')].item()
-                p_raise = probs_adjusted[CLASSES.index('raise')].item()
+                    if p_fold > 0.25:
+                        shift = p_fold - 0.25
+                        probs_adjusted[CLASSES.index('call')] += shift * 0.8
+                        probs_adjusted[CLASSES.index('raise')] += shift * 0.2
+                        probs_adjusted[CLASSES.index('fold')] = 0.25
+
+        # Protect made flushes vs normal bets
+        board_is_monotone = treys_feats_live.get("board_is_monotone", 0.0)
+        made_flush_candidate = street_idx >= 1 and hand_bucket >= 3.0 and board_is_monotone > 0.5
+        if made_flush_candidate and to_call_bb_val > 0:
+            try:
+                idx_bet_frac = self.numeric_cols_order.index('bet_frac_of_pot')
+                bet_frac = float(numeric_vec_unscaled[0, idx_bet_frac])
+            except (ValueError, IndexError):
+                bet_frac = 0.0
+            if bet_frac <= 1.0:
                 p_fold = probs_adjusted[CLASSES.index('fold')].item()
-                p_check = probs_adjusted[CLASSES.index('check')].item() if not facing_bet else 0.0
-                
-                # If facing a bet on paired board
-                if to_call_bb_val > 0:
-                    # Be cautious with weak hands, but not ultra-passive
-                    if hand_bucket < 2.5:  # Weak/marginal (changed from 3.5)
-                        total_action = p_call + p_raise
-                        if total_action > 0.10:
-                            # Shift 60% of call/raise to fold (was 95%)
-                            shift_to_fold = total_action * 0.60
-                            probs_adjusted[CLASSES.index('fold')] += shift_to_fold
-                            probs_adjusted[CLASSES.index('call')] = p_call * 0.40
-                            probs_adjusted[CLASSES.index('raise')] = p_raise * 0.40
-                            print(f"🛑 PAIRED BOARD DEFENSE: Folding (bucket={hand_bucket:.1f}) vs bet")
-                else:
-                    # Not facing bet - reduce bluffing but allow value betting
-                    if hand_bucket < 2.0:  # Weak hands (changed from 3.0)
-                        if p_raise > 0.20:
-                            # Shift 60% of raise to check (was 90%)
-                            shift = p_raise * 0.60
-                            probs_adjusted[CLASSES.index('check')] += shift
-                            probs_adjusted[CLASSES.index('raise')] = p_raise * 0.40
-                            print(f"🛑 PAIRED BOARD: Reducing bluffs (bucket={hand_bucket:.1f})")
-            
-            # === COORDINATED BOARD DEFENSE (TONED DOWN) ===
-            # Monotone/connected boards are dangerous but don't fold everything
-            if (board_is_monotone > 0.5 or board_is_connected > 0.5) and street_idx >= 1:
-                p_call = probs_adjusted[CLASSES.index('call')].item()
-                p_raise = probs_adjusted[CLASSES.index('raise')].item()
-                p_fold = probs_adjusted[CLASSES.index('fold')].item()
-                p_check = probs_adjusted[CLASSES.index('check')].item() if not facing_bet else 0.0
-                
-                dangerous_type = "MONOTONE" if board_is_monotone > 0.5 else "CONNECTED"
-                
-                # If facing a bet on coordinated board
-                if to_call_bb_val > 0:
-                    # Be cautious with weak hands
-                    if hand_bucket < 2.5:  # Weak/marginal (changed from 3.5)
-                        total_action = p_call + p_raise
-                        if total_action > 0.10:
-                            # Shift 50% of call/raise to fold (was 96%)
-                            shift_to_fold = total_action * 0.50
-                            probs_adjusted[CLASSES.index('fold')] += shift_to_fold
-                            probs_adjusted[CLASSES.index('call')] = p_call * 0.50
-                            probs_adjusted[CLASSES.index('raise')] = p_raise * 0.50
-                            print(f"🛑 {dangerous_type} BOARD DEFENSE: Cautious (bucket={hand_bucket:.1f})")
-                else:
-                    # Not facing bet - reduce bluffing with air
-                    if hand_bucket < 1.5:  # Weak hands (changed from 3.0)
-                        if p_raise > 0.30:
-                            # Shift 50% of raise to check (was 95%)
-                            shift = p_raise * 0.50
-                            probs_adjusted[CLASSES.index('check')] += shift
-                            probs_adjusted[CLASSES.index('raise')] = p_raise * 0.50
-                            print(f"🛑 {dangerous_type} BOARD: Reducing bluffs (bucket={hand_bucket:.1f})")
-            
-            # === DEFENSIVE FOLDING HEURISTICS ===
-            # Increase fold probability when facing raises with weak hands
-            # Only trigger when facing actual aggression (not just blinds preflop)
-            facing_real_bet = False
-            if to_call_bb_val > 0:
-                if street_idx == 0:  # Preflop
-                    # Only consider it a real bet if it's bigger than just calling the BB
-                    facing_real_bet = to_call_bb_val > 2.0  # More than 2BB (3-bet+)
-                else:  # Postflop
-                    # Any bet postflop is real aggression
-                    facing_real_bet = to_call_bb_val > 0.5
-            
-            if facing_real_bet:
-                try:
-                    idx_stack = self.numeric_cols_order.index('stack_bb')
-                    stack_bb = float(numeric_vec_unscaled[0, idx_stack])
-                    
-                    p_fold = probs_adjusted[CLASSES.index('fold')].item()
-                    p_call = probs_adjusted[CLASSES.index('call')].item()
-                    p_raise = probs_adjusted[CLASSES.index('raise')].item()
-                    
-                    should_fold = False
-                    fold_reason = ""
-                    
-                    # 1. WEAK HAND FACING BIG RAISE
-                    if hand_bucket < 1.5 and to_call_bb_val > pot_bb * 0.6:
-                        if not (has_flush_draw or has_straight_draw):
-                            # Weak hand, big raise, no draws -> FOLD
-                            should_fold = True
-                            fold_reason = f"weak hand (bucket={hand_bucket:.1f}) facing big raise ({to_call_bb_val:.1f}BB into {pot_bb:.1f}BB pot)"
-                    
-                    # 2. MEDIUM HAND FACING HUGE RAISE (more lenient)
-                    elif hand_bucket >= 1.5 and hand_bucket < 2.0 and to_call_bb_val > pot_bb * 1.5:
-                        # Medium hand facing massive overbet
-                        should_fold = True
-                        fold_reason = f"medium hand (bucket={hand_bucket:.1f}) facing huge overbet ({to_call_bb_val:.1f}BB into {pot_bb:.1f}BB pot)"
-                    
-                    # 3. FACING RAISE WHEN SHORT STACKED (more lenient)
-                    elif stack_bb < 15.0 and to_call_bb_val > stack_bb * 0.4:
-                        # Very short stack, big commitment needed
-                        if hand_bucket < 1.5:
-                            should_fold = True
-                            fold_reason = f"short stack ({stack_bb:.1f}BB) with weak hand (bucket={hand_bucket:.1f})"
-                    
-                    # 4. FACING AGGRESSION ON RIVER WITH WEAK/MARGINAL HAND
-                    elif street_idx == 3 and hand_bucket < 2.0:  # River - increased from 1.5 to 2.0
-                        if to_call_bb_val > pot_bb * 0.5:
-                            # Weak/marginal hand facing river bet - NO HERO CALLS
-                            should_fold = True
-                            fold_reason = f"marginal hand (bucket={hand_bucket:.1f}) on river facing {to_call_bb_val:.1f}BB bet - no hero call"
-                    
-                    # 5. MISSED DRAWS ON RIVER
-                    is_missed_draw = treys_feats_live.get("is_missed_draw_river", 0)
-                    if street_idx == 3 and is_missed_draw:  # River with missed draw
-                        if to_call_bb_val > pot_bb * 0.4:
-                            # Missed draw, facing bet
-                            should_fold = True
-                            fold_reason = "missed draw on river facing bet"
-                    
-                    # Apply fold boost if criteria met
-                    if should_fold:
-                        # Less aggressive fold boost - allow more calls through
-                        fold_boost = p_call * 0.20 + p_raise * 0.40
-                        
-                        probs_adjusted[CLASSES.index('fold')] += fold_boost
-                        probs_adjusted[CLASSES.index('call')] = p_call * 0.80
-                        probs_adjusted[CLASSES.index('raise')] = p_raise * 0.60
-                        
-                        print(f"DEBUG: MODERATE FOLD - {fold_reason}")
-                
-                except Exception as e:
-                    print(f"DEBUG: Defensive fold exception ({e})")
-            
-            # Renormalize
-            total = sum(probs_adjusted[CLASSES.index(a)].item() for a in allowed_actions)
-            if total > 1e-9:
-                for a in allowed_actions:
-                    probs_adjusted[CLASSES.index(a)] /= total
-            
-                probs = probs_adjusted
-            except Exception as e:
-                print(f"DEBUG: Aggression exception ({e})")
-        """
+                if p_fold > 0.15:
+                    shift = p_fold - 0.15
+                    # Prefer calling over folding when holding strong flush-type hand
+                    probs_adjusted[CLASSES.index('call')] += shift
+                    probs_adjusted[CLASSES.index('fold')] = 0.15
         
-        # === EMERGENCY HAND STRENGTH OVERRIDE ===
-        # Prevent model from raising/calling with garbage hands (reuse treys_feats_live)
+        # Use adjusted postflop/river probabilities
+        probs = probs_adjusted
+
+        # Preflop limp leniency for small-completion bucket-1 hands
+        try:
+            idx_street_pf = self.numeric_cols_order.index('street_index')
+            idx_to_call_pf = self.numeric_cols_order.index('to_call_bb')
+            street_idx_pf = int(numeric_vec_unscaled[0, idx_street_pf])
+            to_call_bb_pf = float(numeric_vec_unscaled[0, idx_to_call_pf])
+        except (ValueError, IndexError):
+            street_idx_pf = 0
+            to_call_bb_pf = 0.0
+
+        if street_idx_pf == 0 and 1.0 <= hand_bucket < 2.0 and facing_bet:
+            # Facing a small preflop completion (anything up to 1BB)
+            if to_call_bb_pf <= 1.1:
+                p_fold = probs[CLASSES.index('fold')].item()
+                p_call = probs[CLASSES.index('call')].item()
+                # If there is some call weight, force a strong preference for call
+                if p_call >= 0.20 and p_fold > 0.0:
+                    shift = p_fold * 0.90
+                    probs[CLASSES.index('call')] += shift
+                    probs[CLASSES.index('fold')] = p_fold * 0.10
+                    print(
+                        f"PREFLOP LIMP LENIENCY: bucket={hand_bucket:.1f}, "
+                        f"small to_call={to_call_bb_pf:.2f}, forcing call "
+                        f"(p_fold={p_fold:.2f}, p_call={p_call:.2f})"
+                    )
+
+        # Raise-war control: clamp further aggression after multiple raises
+        try:
+            idx_bet_frac = self.numeric_cols_order.index('bet_frac_of_pot')
+            bet_frac = float(numeric_vec_unscaled[0, idx_bet_frac])
+        except (ValueError, IndexError):
+            bet_frac = 0.0
+
+        dangerous_board_live = (board_has_pair > 0.5) or (board_is_monotone > 0.5) or (board_is_connected > 0.5)
+        weak_or_medium = hand_bucket < 3.5
+
+        # Wet-board stab after flop check-through (turn/river, no bet)
+        if street_idx in (2, 3) and to_call_bb_val <= 0.01:
+            flop_actions = [a for a in self.action_history if a.get('street') == 'flop']
+            flop_had_bet_or_raise = any(a.get('action') in ('bet', 'raise') for a in flop_actions)
+            flop_all_checks_or_folds = all(a.get('action') in ('check', 'fold') for a in flop_actions) if flop_actions else False
+
+            wet_scary_board = (board_has_pair > 0.5) or (board_is_monotone > 0.5) or (board_is_connected > 0.5)
+
+            if wet_scary_board and not flop_had_bet_or_raise and flop_all_checks_or_folds:
+                p_check = probs_adjusted[CLASSES.index('check')].item()
+                p_raise = probs_adjusted[CLASSES.index('raise')].item()
+                if p_check > 0.20:
+                    shift = p_check * 0.40
+                    probs_adjusted[CLASSES.index('raise')] = p_raise + shift
+                    probs_adjusted[CLASSES.index('check')] = p_check - shift
+                    print("WET-BOARD STAB: turn/river bluff after flop check-through on scary board")
+
+        if street_idx >= 1 and to_call_bb_val > 0 and raises_this_street >= 2:
+            # Two or more raises already this street: avoid raise wars.
+            # For non-nut hands on scary or big pots, convert most raise mass
+            # into calls or folds.
+            p_raise = probs_adjusted[CLASSES.index('raise')].item()
+            if p_raise > 0.0:
+                p_call = probs_adjusted[CLASSES.index('call')].item()
+                p_fold = probs_adjusted[CLASSES.index('fold')].item()
+
+                big_pot = pot_bb_val >= 25.0
+                super_big_pot = pot_bb_val >= 40.0
+
+                if weak_or_medium and (dangerous_board_live or big_pot or multiway_pot_flag > 0.5):
+                    # Scary/huge pots with non-nuts: no more raising
+                    shift_to_call = p_raise * 0.60
+                    shift_to_fold = p_raise * 0.40
+                    probs_adjusted[CLASSES.index('call')] = p_call + shift_to_call
+                    probs_adjusted[CLASSES.index('fold')] = p_fold + shift_to_fold
+                    probs_adjusted[CLASSES.index('raise')] = 0.0
+                elif hand_bucket >= 3.5 and (dangerous_board_live or super_big_pot):
+                    # Even strong hands: call more on nightmare/huge pots
+                    shift_to_call = p_raise * 0.70
+                    shift_to_fold = p_raise * 0.30 if bet_frac >= 1.2 else 0.10
+                    probs_adjusted[CLASSES.index('call')] = p_call + shift_to_call
+                    probs_adjusted[CLASSES.index('fold')] = p_fold + shift_to_fold
+                    probs_adjusted[CLASSES.index('raise')] = 0.0
+
+        # Extra cap on river raises in big pots
+        if street_idx == 3 and to_call_bb_val > 0 and pot_bb_val >= 35.0:
+            p_raise = probs_adjusted[CLASSES.index('raise')].item()
+            if p_raise > 0.10:
+                # Convert most raise mass to call with non-nuts on scary boards
+                if hand_bucket < 3.5 or dangerous_board_live:
+                    shift = p_raise * 0.85
+                    probs_adjusted[CLASSES.index('call')] += shift
+                    probs_adjusted[CLASSES.index('raise')] = p_raise * 0.15
+
+        # River bluff suppression: avoid spewing in no-bet spots
+        if street_idx == 3 and to_call_bb_val <= 0.01:
+            p_check = probs_adjusted[CLASSES.index('check')].item()
+            p_raise = probs_adjusted[CLASSES.index('raise')].item()
+            if p_raise > 0.0:
+                nightmare_board = dangerous_board_live or bet_frac >= 0.75
+
+                if hand_bucket < 2.0 and nightmare_board:
+                    # Weak/marginal on nightmare boards: almost never bluff
+                    shift = p_raise * 0.90
+                    probs_adjusted[CLASSES.index('check')] = p_check + shift
+                    probs_adjusted[CLASSES.index('raise')] = p_raise * 0.10
+                elif hand_bucket < 1.0:
+                    # Pure trash on river: strongly prefer check
+                    shift = p_raise * 0.80
+                    probs_adjusted[CLASSES.index('check')] = p_check + shift
+                    probs_adjusted[CLASSES.index('raise')] = p_raise * 0.20
+
+        # Missed river draws: fold/call only, never raise
+        if street_idx == 3 and to_call_bb_val > 0 and is_missed_draw_river:
+            p_raise = probs_adjusted[CLASSES.index('raise')].item()
+            p_call = probs_adjusted[CLASSES.index('call')].item()
+            p_fold = probs_adjusted[CLASSES.index('fold')].item()
+
+            if p_raise > 0.0:
+                # Remove raise; split into fold/call with fold preference.
+                shift_to_fold = p_raise * 0.70
+                shift_to_call = p_raise * 0.30
+                probs_adjusted[CLASSES.index('fold')] = p_fold + shift_to_fold
+                probs_adjusted[CLASSES.index('call')] = p_call + shift_to_call
+                probs_adjusted[CLASSES.index('raise')] = 0.0
+
+        # TREYS-based dynamic aggression block removed (was disabled)
+        
+        # Emergency override: true garbage vs real bets folds more
         try:
             hand_bucket = treys_feats_live["hand_bucket"]
             idx_to_call = self.numeric_cols_order.index('to_call_bb')
             to_call_val = float(numeric_vec_unscaled[0, idx_to_call])
-            
-            # If we have terrible hand (bucket < 0.5) facing a RAISE, heavily favor fold
-            # Allow calling BB with speculative hands (small pairs, suited connectors)
-            if hand_bucket < 0.5 and to_call_val > 1.5:
-                print(f"OVERRIDE: Terrible hand (bucket={hand_bucket:.2f}) vs raise, forcing fold bias")
+            idx_pot_em = self.numeric_cols_order.index('pot_bb')
+            pot_bb_em = float(numeric_vec_unscaled[0, idx_pot_em])
+            idx_street_em = self.numeric_cols_order.index('street_index')
+            street_idx_em = int(numeric_vec_unscaled[0, idx_street_em])
+
+            # Overcards: any card T or higher in our hand
+            ranks_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
+                         'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+            hero_ranks = []
+            for c in self.hole_cards:
+                r = c[1] if c and c[0] in 'CDHS' and len(c) >= 2 else (c[0] if c else '')
+                hero_ranks.append(ranks_map.get(r, 0))
+            has_overcard = any(r >= 10 for r in hero_ranks)
+
+            has_fd = treys_feats_live.get("has_flush_draw", 0.0) > 0.5
+            has_sd = treys_feats_live.get("has_straight_draw", 0.0) > 0.5
+
+            facing_real_bet = to_call_val > 0.0
+            if hand_bucket <= 0.0 and facing_real_bet and not has_fd and not has_sd and not has_overcard and to_call_val > 0.5:
+                print(
+                    f"OVERRIDE: Pure garbage (bucket={hand_bucket:.2f}) vs bet "
+                    f"(to_call={to_call_val:.2f}BB, pot={pot_bb_em:.2f}BB, street={street_idx_em}) - fold bias"
+                )
                 probs_override = probs.clone()
-                probs_override[CLASSES.index('fold')] = 0.80
-                probs_override[CLASSES.index('call')] = 0.15
+                probs_override[CLASSES.index('fold')] = 0.85
+                probs_override[CLASSES.index('call')] = 0.10
                 probs_override[CLASSES.index('raise')] = 0.05
-                probs_override[CLASSES.index('check')] = 0.0
-                # Renormalize to allowed actions
                 total = sum(probs_override[CLASSES.index(a)].item() for a in allowed_actions)
                 if total > 1e-9:
                     for a in allowed_actions:
                         probs_override[CLASSES.index(a)] /= total
                 probs = probs_override
+
+            # Turn weak-no-draw safety: bias hard toward folding
+            if street_idx_em == 2 and facing_real_bet:
+                has_flush_draw_live = treys_feats_live.get("has_flush_draw", 0.0) > 0.5
+                has_straight_draw_live = treys_feats_live.get("has_straight_draw", 0.0) > 0.5
+                if hand_bucket <= 1.5 and (not has_flush_draw_live) and (not has_straight_draw_live) and to_call_val >= 0.5:
+                    print(
+                        f"OVERRIDE: Turn weak no-draw hand (bucket={hand_bucket:.2f}) "
+                        f"vs bet (to_call={to_call_val:.2f}BB, pot={pot_bb_em:.2f}BB) - biasing to fold"
+                    )
+                    probs_override = probs.clone()
+                    p_fold = probs_override[CLASSES.index('fold')]
+                    p_call = probs_override[CLASSES.index('call')]
+                    p_raise = probs_override[CLASSES.index('raise')]
+                    extra_to_fold = 0.7 * (p_call + p_raise)
+                    probs_override[CLASSES.index('fold')] = min(1.0, p_fold + extra_to_fold)
+                    probs_override[CLASSES.index('call')] = max(0.0, 0.3 * p_call)
+                    probs_override[CLASSES.index('raise')] = max(0.0, 0.3 * p_raise)
+                    total = sum(probs_override[CLASSES.index(a)].item() for a in allowed_actions)
+                    if total > 1e-9:
+                        for a in allowed_actions:
+                            probs_override[CLASSES.index(a)] /= total
+                    probs = probs_override
         except Exception as e:
             print(f"DEBUG: Override exception ({e})")
         
-        # Choose best action
-        best_name = None
-        best_prob = -1.0
-        for name in allowed_actions:
-            idx = CLASSES.index(name)
-            val = probs[idx].item()
-            if val > best_prob:
-                best_prob = val
-                best_name = name
-        action_name = best_name or CLASSES[int(torch.argmax(probs).item())]
+        # Final sanity clamp: tiny raise never beats near-certain passive
+        try:
+            idx_check = CLASSES.index('check')
+            idx_raise = CLASSES.index('raise')
+            idx_call = CLASSES.index('call')
+            # No-bet: if check crushes raise, force check
+            if to_call_bb_val <= 0.01 and 'check' in allowed_actions:
+                p_check = probs[idx_check].item()
+                p_raise = probs[idx_raise].item()
+                if p_check >= 0.95 and p_raise <= 0.05:
+                    action_name = 'check'
+                else:
+                    action_name = None
+            # Facing bet: if call crushes raise, force call
+            elif to_call_bb_val > 0.01 and 'call' in allowed_actions:
+                p_call = probs[idx_call].item()
+                p_raise = probs[idx_raise].item()
+                if p_call >= 0.95 and p_raise <= 0.05:
+                    action_name = 'call'
+                else:
+                    action_name = None
+            else:
+                action_name = None
+        except Exception:
+            action_name = None
+
+        # Choose best action if sanity clamp didn't already decide
+        if not action_name:
+            best_name = None
+            best_prob = -1.0
+            for name in allowed_actions:
+                idx = CLASSES.index(name)
+                val = probs[idx].item()
+                if val > best_prob:
+                    best_prob = val
+                    best_name = name
+            action_name = best_name or CLASSES[int(torch.argmax(probs).item())]
 
         # Remap illegal 'check' when facing bet
         if to_call_bb_val > 1e-6 and action_name == 'check':
@@ -915,7 +952,14 @@ class LiveHandTracker:
         prob_dict = {name: f"{p.item():.4f}" for name, p in zip(CLASSES, probs)}
         print(f"Probs: {prob_dict} ==> {action_name}")
         
-        return action_name, prob_dict
+        # Determine raise amount: $10 for very strong hands, $5 for everything else
+        if action_name == 'raise':
+            raise_amount = 10.0 if hand_bucket >= 3.5 else 5.0
+            print(f"RAISE AMOUNT: ${raise_amount:.0f} (hand_bucket={hand_bucket:.2f})")
+        else:
+            raise_amount = 0.0
+        
+        return action_name, prob_dict, raise_amount
 
 
 # Global tracker instance
@@ -1005,7 +1049,7 @@ def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
     _tracker.current_street = street
     _tracker.update_state_from_cv(tracker_data)
     
-    action, prob_dict = _tracker.predict_action()
+    action, prob_dict, raise_amount = _tracker.predict_action()
     
     probs_float = {k: float(v) if isinstance(v, (int, float)) else float(v) for k, v in prob_dict.items()}
     confidence = max(probs_float.values())
@@ -1013,7 +1057,8 @@ def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'action': action,
         'confidence': confidence,
-        'probabilities': prob_dict
+        'probabilities': prob_dict,
+        'raise_amount': raise_amount
     }
 
 def reset_hand():
@@ -1083,3 +1128,5 @@ if __name__ == "__main__":
     print(f"Action: {result['action']}")
     print(f"Confidence: {result['confidence']:.2%}")
     print(f"Probabilities: {result['probabilities']}")
+    if result.get('raise_amount', 0) > 0:
+        print(f"Raise Amount: ${result['raise_amount']:.0f}")

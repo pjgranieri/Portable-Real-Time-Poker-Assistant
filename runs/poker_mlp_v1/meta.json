@@ -65,7 +65,7 @@
   "policy": {
     "fold_thresh": 0.0,
     "fold_margin": 0.0,
-    "call_logit_bias": 0.0
+    "call_logit_bias": 0.3
   },
   "loss": {
     "type": "crossentropy",
