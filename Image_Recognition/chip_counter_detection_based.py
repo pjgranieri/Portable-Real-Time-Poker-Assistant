@@ -5,10 +5,9 @@ Instead of measuring bounding box height, this counts actual chip detections
 and analyzes the chip region for patterns.
 
 Strategies:
-1. Count number of chip detections (multiple chips = multiple bboxes)
-2. Analyze bounding box area (more chips = larger area)
-3. Analyze pixel patterns within chip region (stack height via pixels)
-4. Combine multiple signals for robustness
+1. Use YOLO to detect chip regions
+2. Analyze detected region for color (red vs blue)
+3. Return color-specific value ($5 red, $10 blue)
 """
 
 from ultralytics import YOLO
@@ -19,7 +18,7 @@ from pathlib import Path
 
 
 class DetectionBasedChipCounter:
-    """Count chips using detection count + area + visual analysis."""
+    """Count chips using YOLO detection + color analysis."""
 
     def __init__(self, model_path=None):
         if model_path is None:
@@ -29,6 +28,180 @@ class DetectionBasedChipCounter:
         self.model = YOLO(model_path)
         print(f"[DETECTION COUNTER] Loaded model: {model_path}")
         print(f"[DETECTION COUNTER] Model classes: {self.model.names}")
+
+        # Chip values by color
+        self.chip_values = {
+            'red': 5,
+            'blue': 10
+        }
+
+        # Color thresholds in HSV
+        self.color_ranges = {
+            'red': [
+                (np.array([0, 100, 100]), np.array([10, 255, 255])),
+                (np.array([160, 100, 100]), np.array([180, 255, 255]))
+            ],
+            'blue': [
+                (np.array([100, 100, 100]), np.array([130, 255, 255]))
+            ]
+        }
+
+        print("[CHIP DETECTION COUNTER] Initialized with color detection")
+        print("[CHIP DETECTION COUNTER] Red = $5, Blue = $10")
+        print("[CHIP DETECTION COUNTER] Hardcap: 1 chip at a time")
+
+    def detect_chip_color_and_value(self, image_path, conf_threshold=0.25):
+        """
+        Detect chip using YOLO, then analyze color
+        
+        Process:
+        1. Use YOLO to find chip region
+        2. Crop to chip bounding box
+        3. Analyze cropped region for color (red vs blue)
+        4. Return color and corresponding value
+        
+        Args:
+            image_path: Path to image
+            conf_threshold: Confidence threshold for YOLO detection
+        
+        Returns:
+            dict: {
+                'color': 'red' | 'blue' | None,
+                'value': int (5 or 10),
+                'confidence': float (0-1),
+                'chip_count': int (0 or 1),
+                'details': str
+            }
+        """
+        # Load image
+        img = cv2.imread(image_path)
+        if img is None:
+            return {
+                'color': None,
+                'value': 0,
+                'confidence': 0.0,
+                'chip_count': 0,
+                'details': 'Failed to load image'
+            }
+        
+        # STEP 1: Use YOLO to detect chip
+        results = self.model(image_path, conf=conf_threshold, verbose=False)
+        
+        # Find the best chip detection
+        best_detection = None
+        best_conf = 0
+        
+        for r in results:
+            for box in r.boxes:
+                conf = float(box.conf[0])
+                class_id = int(box.cls[0])
+                
+                # Check if it's a poker chip
+                if self.model.names[class_id] == 'Poker-Chips' and conf > best_conf:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+                    best_detection = {
+                        'bbox': (x1, y1, x2, y2),
+                        'conf': conf
+                    }
+                    best_conf = conf
+        
+        if best_detection is None:
+            return {
+                'color': None,
+                'value': 0,
+                'confidence': 0.0,
+                'chip_count': 0,
+                'details': 'No chip detected by YOLO'
+            }
+        
+        # STEP 2: Crop to detected chip region
+        x1, y1, x2, y2 = best_detection['bbox']
+        chip_region = img[y1:y2, x1:x2]
+        
+        if chip_region.size == 0:
+            return {
+                'color': None,
+                'value': 0,
+                'confidence': best_detection['conf'],
+                'chip_count': 0,
+                'details': 'Empty chip region'
+            }
+        
+        # STEP 3: Analyze color in the detected region
+        color_result = self._analyze_chip_color(chip_region)
+        
+        if color_result['color'] is None:
+            return {
+                'color': None,
+                'value': 0,
+                'confidence': best_detection['conf'],
+                'chip_count': 1,
+                'details': f"YOLO detected chip but color unclear: {color_result['details']}"
+            }
+        
+        # STEP 4: Return result with color-specific value
+        detected_color = color_result['color']
+        chip_value = self.chip_values[detected_color]
+        
+        return {
+            'color': detected_color,
+            'value': chip_value,
+            'confidence': best_detection['conf'],
+            'chip_count': 1,
+            'details': f"YOLO detected chip (conf={best_detection['conf']:.2f}), color={detected_color}, value=${chip_value}"
+        }
+    
+    def _analyze_chip_color(self, chip_region):
+        """
+        Analyze color of detected chip region
+        
+        Args:
+            chip_region: Cropped image of chip (from YOLO bbox)
+        
+        Returns:
+            dict: {'color': 'red'|'blue'|None, 'details': str, 'scores': dict}
+        """
+        # Convert to HSV
+        hsv = cv2.cvtColor(chip_region, cv2.COLOR_BGR2HSV)
+        
+        # Score each color
+        color_scores = {}
+        
+        for color_name, hsv_ranges in self.color_ranges.items():
+            total_pixels = 0
+            
+            for lower_hsv, upper_hsv in hsv_ranges:
+                # Create mask for this color range
+                mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+                
+                # Count pixels matching this color
+                pixel_count = np.count_nonzero(mask)
+                total_pixels += pixel_count
+            
+            # Calculate percentage of pixels matching this color
+            total_area = chip_region.shape[0] * chip_region.shape[1]
+            percentage = (total_pixels / total_area) * 100 if total_area > 0 else 0
+            
+            color_scores[color_name] = percentage
+        
+        # Find dominant color
+        best_color = max(color_scores.items(), key=lambda x: x[1])
+        
+        # Require at least 10% of pixels to match a color
+        MIN_THRESHOLD = 10.0
+        
+        if best_color[1] >= MIN_THRESHOLD:
+            return {
+                'color': best_color[0],
+                'details': f"{best_color[0]} ({best_color[1]:.1f}% match)",
+                'scores': color_scores
+            }
+        
+        return {
+            'color': None,
+            'details': f"No strong color match (red={color_scores['red']:.1f}%, blue={color_scores['blue']:.1f}%)",
+            'scores': color_scores
+        }
 
     def _analyze_chip_region(self, image, bbox):
         """
@@ -177,8 +350,21 @@ if __name__ == "__main__":
         image_path = sys.argv[1]
 
         counter = DetectionBasedChipCounter()
+        
+        # Test color detection
+        print(f"\n{'='*60}")
+        print(f"CHIP COLOR DETECTION TEST")
+        print(f"{'='*60}")
+        result = counter.detect_chip_color_and_value(image_path)
+        print(f"Image: {image_path}")
+        print(f"Color: {result['color']}")
+        print(f"Value: ${result['value']}")
+        print(f"Confidence: {result['confidence']:.2f}")
+        print(f"Details: {result['details']}")
+        print(f"{'='*60}\n")
+        
+        # Test chip counting
         result = counter.count_chips(image_path)
-
         print(f"\n{'='*60}")
         print(f"DETECTION-BASED CHIP COUNTING")
         print(f"{'='*60}")
@@ -194,4 +380,4 @@ if __name__ == "__main__":
         print("Usage:")
         print("  python chip_counter_detection_based.py <image_path>")
         print("\nExample:")
-        print("  python chip_counter_detection_based.py CVDataset/RedChips/3Chips/image.jpg")
+        print("  python chip_counter_detection_based.py CVDataset/RedChips/1Chip/image.jpg")

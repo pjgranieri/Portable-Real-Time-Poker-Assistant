@@ -221,7 +221,7 @@ class MultiPlayerCVInputInterface:
         Process:
         1. Get full image from server
         2. Analyze FULL image with EnhancedActionAnalyzer
-        3. If BET/RAISE detected, analyze FULL image for chip count
+        3. EnhancedActionAnalyzer now returns the bet amount directly based on chip color
 
         Args:
             player_enum: Player enum (Player.PlayerOne, etc.)
@@ -251,47 +251,38 @@ class MultiPlayerCVInputInterface:
                 result = self.action_analyzer.analyze_action(full_image_path)
                 action_type = result['action']
                 details = result['details']
+                bet_value = result.get('value', 0)
 
                 print(f"  [CV] Enhanced analyzer result: {action_type}")
                 print(f"  [CV] Details: {details}")
+                if bet_value > 0:
+                    print(f"  [CV] Bet value: ${bet_value}")
 
-                # STEP 2: If BET/RAISE, analyze FULL IMAGE for chips
+                # STEP 2: If BET/RAISE, use the value from chip detection
                 if action_type == 'BET/RAISE':
-                    print(f"  [CV] BET/RAISE detected - waiting 5 seconds then analyzing chips...")
-                    time.sleep(5)
-
-                    # Get new image for pot (player may have moved chips)
-                    try:
-                        pot_image_path = self.get_latest_image(timeout=60)
-                    except TimeoutError:
-                        print(f"  [WARNING] No new image for chips, using same image")
-                        pot_image_path = full_image_path
-
-                    # Count chips on FULL IMAGE with ENHANCED counter
-                    print(f"  [CV] Analyzing FULL IMAGE with DetectionBasedChipCounter...")
-                    chip_result = self.chip_counter.count_chips(pot_image_path)
-                    chip_count = chip_result['count']
-                    bet_amount = chip_count * 5  # Each chip = $5
-
-                    print(f"  [CV] Chip analysis: {chip_count} chips = ${bet_amount}")
-                    print(f"  [CV] Method: {chip_result['method']}, Confidence: {chip_result['confidence']:.2f}")
-
-                    # Determine if it's a call or raise
-                    if bet_amount > call_value:
-                        if bet_amount > bankroll:
-                            bet_amount = bankroll
-                        print(f"  ✅ Action: RAISE to ${bet_amount}")
-                        self.apply_grace_period()
-                        return ('raise', bet_amount)
-                    elif bet_amount == call_value and call_value > 0:
-                        print(f"  ✅ Action: CALL ${call_value}")
-                        self.apply_grace_period()
-                        return ('call', call_value)
+                    if bet_value > 0:
+                        # Ensure bet doesn't exceed bankroll
+                        if bet_value > bankroll:
+                            bet_value = bankroll
+                        
+                        # Determine if it's a call or raise
+                        if bet_value > call_value:
+                            print(f"  ✅ Action: RAISE to ${bet_value}")
+                            self.apply_grace_period()
+                            return ('raise', bet_value)
+                        elif bet_value == call_value and call_value > 0:
+                            print(f"  ✅ Action: CALL ${call_value}")
+                            self.apply_grace_period()
+                            return ('call', call_value)
+                        else:
+                            # Bet is less than call value - treat as raise to detected amount
+                            print(f"  ⚠️  Detected ${bet_value} but need ${call_value} to call")
+                            print(f"  → Treating as RAISE to ${bet_value}")
+                            self.apply_grace_period()
+                            return ('raise', bet_value)
                     else:
-                        print(f"  ⚠️  Detected ${bet_amount} but need ${call_value} to call")
-                        print(f"  → Treating as RAISE to ${bet_amount}")
-                        self.apply_grace_period()
-                        return ('raise', bet_amount)
+                        print(f"  ⚠️  BET/RAISE detected but no chip value - retrying...")
+                        continue
 
                 # STEP 3: Handle FOLD
                 if action_type == 'FOLD':
@@ -331,11 +322,6 @@ class MultiPlayerCVInputInterface:
         # Fallback - default to fold
         print("\n⚠️  No valid action detected, defaulting to FOLD")
         return ('fold', 0)
-
-    def get_opponent_action(self, player_enum, call_value, bankroll, min_raise_total=None):
-        """Get opponent action using CV - NO CROPPING (full image analysis)"""
-        return self.wait_for_action(player_enum, call_value, bankroll)
-
 
 class TestMultiPlayerCVIntegration:
     """Multi-player test with CV integration and enhanced models - NO CROPPING"""
