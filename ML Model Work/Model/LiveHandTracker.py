@@ -357,7 +357,7 @@ class LiveHandTracker:
 
         return np.array(numeric_feature_vector, dtype=np.float32).reshape(1, -1)
 
-    def predict_action(self) -> Tuple[str, Dict[str, float]]:
+    def predict_action(self) -> Tuple[str, Dict[str, float], float]:
         """Get model prediction with Treys-based aggression adjustments"""
         print(f"--- Predicting for {self.my_pos} on {self.current_street} ---")
         
@@ -495,8 +495,8 @@ class LiveHandTracker:
                 stack_bb_val = 0.0
 
             # Treat blinds as "facing a small bet" preflop; still allow strong opens
-            # FORCE-RAISE with strong/value hands when cost is small (<= 2BB)
-            if to_call_bb_val <= 2.0 and (strong_preflop or value_preflop):
+            # FORCE-RAISE only with strong hands (3.0+) when cost is small (<= 2BB)
+            if to_call_bb_val <= 2.0 and strong_preflop:
                 p_fold = probs_adjusted[CLASSES.index('fold')]
                 p_call = probs_adjusted[CLASSES.index('call')]
                 p_check = probs_adjusted[CLASSES.index('check')]
@@ -952,7 +952,14 @@ class LiveHandTracker:
         prob_dict = {name: f"{p.item():.4f}" for name, p in zip(CLASSES, probs)}
         print(f"Probs: {prob_dict} ==> {action_name}")
         
-        return action_name, prob_dict
+        # Determine raise amount: $10 for very strong hands, $5 for everything else
+        if action_name == 'raise':
+            raise_amount = 10.0 if hand_bucket >= 3.5 else 5.0
+            print(f"RAISE AMOUNT: ${raise_amount:.0f} (hand_bucket={hand_bucket:.2f})")
+        else:
+            raise_amount = 0.0
+        
+        return action_name, prob_dict, raise_amount
 
 
 # Global tracker instance
@@ -1042,7 +1049,7 @@ def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
     _tracker.current_street = street
     _tracker.update_state_from_cv(tracker_data)
     
-    action, prob_dict = _tracker.predict_action()
+    action, prob_dict, raise_amount = _tracker.predict_action()
     
     probs_float = {k: float(v) if isinstance(v, (int, float)) else float(v) for k, v in prob_dict.items()}
     confidence = max(probs_float.values())
@@ -1050,7 +1057,8 @@ def main(cv_json: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'action': action,
         'confidence': confidence,
-        'probabilities': prob_dict
+        'probabilities': prob_dict,
+        'raise_amount': raise_amount
     }
 
 def reset_hand():
@@ -1120,3 +1128,5 @@ if __name__ == "__main__":
     print(f"Action: {result['action']}")
     print(f"Confidence: {result['confidence']:.2%}")
     print(f"Probabilities: {result['probabilities']}")
+    if result.get('raise_amount', 0) > 0:
+        print(f"Raise Amount: ${result['raise_amount']:.0f}")
