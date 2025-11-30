@@ -47,6 +47,7 @@ class TestGameOrchestrator:
         """
         # If this is the coach and ML is enabled, use ML model
         if player_enum == Player.PlayerCoach and ML_ENABLED:
+            # Generate JSON for ML model
             json_payload = self.ml_generator.generate_json_for_coach_action(
                 game_state=self.state,
                 cards=self.cards,
@@ -55,22 +56,18 @@ class TestGameOrchestrator:
                 call_value=call_value
             )
             
-            action, value = ml_get_action(json_payload, ml_generator=self.ml_generator)
+            # Get ML prediction
+            action, value = ml_get_action(json_payload)
             return (action, value)
         
-        # Manual input for opponent
+        # Otherwise use manual input
         player_data = self.players.get(player_enum)
-        action, value = self.input_interface.get_action(
+        return self.input_interface.get_action(
             player_enum.name,
             call_value,
             player_data["bankroll"],
             min_raise_total=min_raise_total
         )
-        
-        if player_enum != Player.PlayerCoach:
-            self.ml_generator.record_action(player_enum.name, action, value)
-        
-        return (action, value)
     
     def mock_read_showdown_hands(self, remaining_players):
         """Manual input for player hands at showdown"""
@@ -120,7 +117,7 @@ class TestGameOrchestrator:
         print(f"\n{'='*60}")
         print(" CURRENT BANKROLLS")
         print(f"{'='*60}")
-        for player in [Player.PlayerCoach, Player.PlayerOne]:
+        for player in [Player.PlayerCoach, Player.PlayerOne, Player.PlayerTwo, Player.PlayerThree]:
             bankroll = self.players.get(player)["bankroll"]
             folded = " (FOLDED)" if self.players.get(player)["folded"] else ""
             print(f"  {player.name}: ${bankroll}{folded}")
@@ -159,19 +156,24 @@ class TestGameOrchestrator:
     def wait_for_game_start(self):
         """Wait for game start"""
         self.input_interface.wait_for_game_start(self.ml_generator.hand_id + 1)
-        
+
         # Initialize/reset all values
         self.players.initialize_bankrolls()
-        self.cards.reset()
+        self.cards.reset()  # Reset hole cards and community cards
         self.community_pot = 0
         self.call_value = 0
-        
+
+        # Rotate blinds for new hand (except first hand)
+        if self.ml_generator.hand_id > 0:
+            self.players.rotate_blinds()
+
         # Increment hand_id and reset ML model
         self.ml_generator.increment_hand()
         if ML_ENABLED:
             ml_reset_game()
-        
+
         print(f"\n Game initialized. All players start with $175. (Hand #{self.ml_generator.hand_id})")
+        print(f" Small Blind: {self.players.small_blind.name}, Big Blind: {self.players.big_blind.name}")
         self.state = GameState.WAIT_FOR_HOLE_CARDS
     
     def wait_for_hole_cards(self):

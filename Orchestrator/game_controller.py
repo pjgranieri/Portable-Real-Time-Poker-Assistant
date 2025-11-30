@@ -63,16 +63,21 @@ class PokerGameOrchestrator:
         """Wait for game start indicator (blank screen, red paper, etc.)"""
         print("[STATE] Waiting for game start...")
         reset_type = wait_for_signal(SignalType.GAME_START)
-        
+
         # Initialize/reset all values
         self.players.initialize_bankrolls()
         self.community_pot = 0
         self.call_value = 0
-        
+
+        # Rotate blinds for new hand (except first hand)
+        if self.ml_generator.hand_id > 0:
+            self.players.rotate_blinds()
+
         # Set server to NoCrop mode
         set_crop_mode(NoCrop=True)
-        
-        print(f"[STATE] Game initialized. All players start with 100 chips. Hand #{self.ml_generator.hand_id + 1}")
+
+        print(f"[STATE] Game initialized. All players start with 175 chips. Hand #{self.ml_generator.hand_id + 1}")
+        print(f"[STATE] Small Blind: {self.players.small_blind.name}, Big Blind: {self.players.big_blind.name}")
         self.state = GameState.WAIT_FOR_HOLE_CARDS
 
     def wait_for_hole_cards(self):

@@ -139,7 +139,7 @@ class PokerGameOrchestrator:
         print(f"\n{'='*60}")
         print("CURRENT BANKROLLS")
         print(f"{'='*60}")
-        for player in [Player.PlayerCoach, Player.PlayerOne]:
+        for player in [Player.PlayerCoach, Player.PlayerOne, Player.PlayerTwo, Player.PlayerThree]:
             bankroll = self.players.get(player)["bankroll"]
             folded = " (FOLDED)" if self.players.get(player)["folded"] else ""
             print(f"  {player.name}: ${bankroll}{folded}")
@@ -185,30 +185,35 @@ class PokerGameOrchestrator:
         print(f"\n{'='*60}")
         print(f"WAITING FOR NEW GAME (Hand #{self.ml_generator.hand_id + 1})")
         print(f"{'='*60}")
-        
+
         try:
             # TODO: Replace with CV game start detection
             # reset_type = wait_for_signal(SignalType.GAME_START)
             # set_crop_mode(NoCrop=True)
-            
+
             # PLACEHOLDER: Manual trigger
             input("Press Enter to start new game...")
-            
+
         except Exception as e:
             print(f"Error detecting game start: {e}")
             input("Press Enter to continue anyway...")
-        
+
         # Initialize/reset all values
         self.players.initialize_bankrolls()
         self.community_pot = 0
         self.call_value = 0
-        
+
+        # Rotate blinds for new hand (except first hand)
+        if self.ml_generator.hand_id > 0:
+            self.players.rotate_blinds()
+
         # Increment hand_id and reset ML model
         self.ml_generator.increment_hand()
         if ML_ENABLED:
             ml_reset_game()
-        
+
         print(f"\nGame initialized. All players start with $175. (Hand #{self.ml_generator.hand_id})")
+        print(f"Small Blind: {self.players.small_blind.name}, Big Blind: {self.players.big_blind.name}")
         self.state = GameState.WAIT_FOR_HOLE_CARDS
     
     def wait_for_hole_cards(self):
