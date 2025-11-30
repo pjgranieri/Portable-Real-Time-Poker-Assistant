@@ -14,6 +14,7 @@ from ultralytics import YOLO
 import cv2
 import numpy as np
 import os
+import mediapipe as mp
 
 
 class EnhancedActionAnalyzer:
@@ -30,8 +31,37 @@ class EnhancedActionAnalyzer:
         self.fold_thresholds = [0.20, 0.15, 0.10]
         self.chip_thresholds = [0.25, 0.20, 0.15]
 
+        # Initialize MediaPipe Hands
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=True,
+            max_num_hands=2,
+            min_detection_confidence=0.5
+        )
+
+        # Detection thresholds
+        self.chip_detection_thresholds = {
+            'area_min': 100,  # Minimum contour area for chips
+            'area_max': 5000,  # Maximum contour area for chips
+            'aspect_ratio_min': 0.7,  # Chips should be roughly circular
+            'aspect_ratio_max': 1.4,
+            'circularity_min': 0.6  # How circular the contour is
+        }
+
+        self.fold_detection_thresholds = {
+            'hand_confidence': 0.5,  # MediaPipe hand detection confidence
+            'closed_hand_threshold': 0.15  # Finger curl detection
+        }
+
+        self.check_detection_thresholds = {
+            'hand_confidence': 0.5,
+            'open_hand_threshold': 0.25  # Open palm detection
+        }
+
         print("[ENHANCED ANALYZER] Initialized")
         print(f"[ENHANCED ANALYZER] Model classes: {self.model.names}")
+        print("[ACTION ANALYZER] Initialized with MediaPipe")
+        print("[ACTION ANALYZER] Detection order: CHIPS -> FOLD -> CHECK")
 
     def _preprocess_image(self, image_path):
         """
@@ -110,6 +140,209 @@ class EnhancedActionAnalyzer:
                         return True, max_conf, detections
 
         return False, 0.0, []
+
+    def _detect_chips(self, img):
+        """
+        Detect poker chips using contour analysis
+
+        Returns:
+            dict: {'detected': bool, 'confidence': float, 'details': str}
+        """
+        # Convert to HSV for better color detection
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        # Create masks for common chip colors (red, blue, green, white, black)
+        # Red chips
+        lower_red1 = np.array([0, 100, 100])
+        upper_red1 = np.array([10, 255, 255])
+        lower_red2 = np.array([160, 100, 100])
+        upper_red2 = np.array([180, 255, 255])
+        mask_red = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+
+        # Blue chips
+        lower_blue = np.array([100, 100, 100])
+        upper_blue = np.array([130, 255, 255])
+        mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
+
+        # Green chips
+        lower_green = np.array([40, 100, 100])
+        upper_green = np.array([80, 255, 255])
+        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+
+        # Combine all color masks
+        combined_mask = mask_red | mask_blue | mask_green
+
+        # Apply morphological operations to clean up
+        kernel = np.ones((3, 3), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+
+        # Find contours
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        chip_candidates = []
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            # Check area threshold
+            if area < self.chip_detection_thresholds['area_min'] or area > self.chip_detection_thresholds['area_max']:
+                continue
+
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+            aspect_ratio = w / float(h) if h > 0 else 0
+
+            # Check aspect ratio (chips should be roughly circular)
+            if not (self.chip_detection_thresholds['aspect_ratio_min'] <= aspect_ratio <= self.chip_detection_thresholds['aspect_ratio_max']):
+                continue
+
+            # Check circularity
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter > 0:
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+                if circularity >= self.chip_detection_thresholds['circularity_min']:
+                    chip_candidates.append({
+                        'area': area,
+                        'circularity': circularity,
+                        'aspect_ratio': aspect_ratio
+                    })
+
+        if len(chip_candidates) > 0:
+            # Calculate confidence based on number of chips and their properties
+            avg_circularity = np.mean([c['circularity'] for c in chip_candidates])
+            confidence = min(1.0, avg_circularity * (len(chip_candidates) / 5.0))
+
+            return {
+                'detected': True,
+                'confidence': confidence,
+                'details': f"{len(chip_candidates)} chip(s) detected, avg circularity={avg_circularity:.2f}"
+            }
+
+        return {
+            'detected': False,
+            'confidence': 0.0,
+            'details': 'No chips detected'
+        }
+
+    def _detect_fold_mediapipe(self, img):
+        """
+        Detect FOLD gesture using MediaPipe (closed hand/fist)
+
+        Returns:
+            dict: {'detected': bool, 'confidence': float, 'details': str}
+        """
+        # Convert BGR to RGB for MediaPipe
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Process with MediaPipe
+        results = self.hands.process(rgb_img)
+
+        if not results.multi_hand_landmarks:
+            return {
+                'detected': False,
+                'confidence': 0.0,
+                'details': 'No hands detected'
+            }
+
+        # Check if hand is closed (fist)
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Calculate finger curl (distance between fingertips and palm)
+            palm_center = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
+
+            # Check all fingertips
+            fingertips = [
+                self.mp_hands.HandLandmark.THUMB_TIP,
+                self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+                self.mp_hands.HandLandmark.RING_FINGER_TIP,
+                self.mp_hands.HandLandmark.PINKY_TIP
+            ]
+
+            distances = []
+            for tip in fingertips:
+                tip_point = hand_landmarks.landmark[tip]
+                dist = np.sqrt(
+                    (tip_point.x - palm_center.x)**2 +
+                    (tip_point.y - palm_center.y)**2
+                )
+                distances.append(dist)
+
+            avg_distance = np.mean(distances)
+
+            # If fingers are close to palm (closed hand), it's a fold
+            if avg_distance < self.fold_detection_thresholds['closed_hand_threshold']:
+                confidence = 1.0 - (avg_distance / self.fold_detection_thresholds['closed_hand_threshold'])
+                return {
+                    'detected': True,
+                    'confidence': confidence,
+                    'details': f"Closed hand detected (avg finger distance={avg_distance:.3f})"
+                }
+
+        return {
+            'detected': False,
+            'confidence': 0.0,
+            'details': 'Hand detected but not closed'
+        }
+
+    def _detect_check_mediapipe(self, img):
+        """
+        Detect CHECK gesture using MediaPipe (open palm)
+
+        Returns:
+            dict: {'detected': bool, 'confidence': float, 'details': str}
+        """
+        # Convert BGR to RGB for MediaPipe
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Process with MediaPipe
+        results = self.hands.process(rgb_img)
+
+        if not results.multi_hand_landmarks:
+            return {
+                'detected': False,
+                'confidence': 0.0,
+                'details': 'No hands detected'
+            }
+
+        # Check if hand is open (palm)
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Calculate finger extension (distance between fingertips and palm)
+            palm_center = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
+
+            # Check all fingertips
+            fingertips = [
+                self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
+                self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+                self.mp_hands.HandLandmark.RING_FINGER_TIP,
+                self.mp_hands.HandLandmark.PINKY_TIP
+            ]
+
+            distances = []
+            for tip in fingertips:
+                tip_point = hand_landmarks.landmark[tip]
+                dist = np.sqrt(
+                    (tip_point.x - palm_center.x)**2 +
+                    (tip_point.y - palm_center.y)**2
+                )
+                distances.append(dist)
+
+            avg_distance = np.mean(distances)
+
+            # If fingers are extended away from palm (open hand), it's a check
+            if avg_distance > self.check_detection_thresholds['open_hand_threshold']:
+                confidence = min(1.0, avg_distance / 0.4)  # Normalize to 0-1
+                return {
+                    'detected': True,
+                    'confidence': confidence,
+                    'details': f"Open palm detected (avg finger distance={avg_distance:.3f})"
+                }
+
+        return {
+            'detected': False,
+            'confidence': 0.0,
+            'details': 'Hand detected but not open'
+        }
 
     def analyze_action(self, image_path):
         """
