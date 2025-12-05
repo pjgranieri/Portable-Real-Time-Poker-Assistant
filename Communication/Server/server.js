@@ -7,7 +7,7 @@ require('dotenv').config();
 const app = express();
 app.use(express.json({ limit: '50mb' })); // Increase payload limit for images
 
-API_KEY = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
+const API_KEY = process.env.API_KEY || "your-api-key-here";
 
 // Cropping control flags - set via API
 let croppingMode = {
