@@ -26,22 +26,12 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
     if ml_generator:
         ml_generator.reset_round()
     
-    # Players 2 and 3 always fold immediately
-    players.get(Player.PlayerTwo)["folded"] = True
-    players.get(Player.PlayerThree)["folded"] = True
-    players_acted[Player.PlayerTwo] = True
-    players_acted[Player.PlayerThree] = True
+    # All 4 players are now active (removed auto-fold for Players 2 and 3)
     
     # Handle blinds for pre-flop
     if is_preflop:
         small_blind_player = list(Player)[start_index]
         big_blind_player = list(Player)[(start_index + 1) % 4]
-        
-        # Skip if players 2 or 3 are blinds (should rotate between coach and player1)
-        if small_blind_player in [Player.PlayerTwo, Player.PlayerThree]:
-            small_blind_player = Player.PlayerCoach
-        if big_blind_player in [Player.PlayerTwo, Player.PlayerThree]:
-            big_blind_player = Player.PlayerOne
         
         # Small blind posts 5
         small_blind_amount = 5
@@ -63,13 +53,10 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
         
         # DON'T update ml_generator with blind posts - they're not "actions"
         # This keeps first_to_act = True until actual betting starts
-        
+
         # Blinds have NOT acted yet - they need to respond to any raises
-        # Start action after big blind
-        if big_blind_player == Player.PlayerCoach:
-            start_index = Player.PlayerOne.value
-        else:
-            start_index = Player.PlayerCoach.value
+        # Start action after big blind (next player in rotation)
+        start_index = (start_index + 2) % 4
     
     cycle_position = 0
     
@@ -129,17 +116,6 @@ def run_betting_cycle(players, community_pot, call_value=0, game_state=None, car
 
         # Ask for action (pass min_raise_total so InputInterface can validate)
         action, value = players.get_action(current_player, crop_region, amount_needed_to_call, min_raise_total)
-        
-        # Update last action in ML generator (simplified) - NOW we track actions
-        if ml_generator:
-            if action == "raise":
-                ml_generator.set_last_action("raise")
-            elif action == "call":
-                ml_generator.set_last_action("call")
-            elif action == "check":
-                ml_generator.set_last_action("check")
-            elif action == "fold":
-                ml_generator.set_last_action("fold")
         
         if action == "fold":
             player_data["folded"] = True

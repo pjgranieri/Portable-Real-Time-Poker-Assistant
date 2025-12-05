@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.raw({ type: 'image/jpeg', limit: '10mb' })); // Add raw binary support
 
-API_KEY = "ewfgjiohewiuhwe8934yt83gigiuewhui83h8ge84849g4h489g";
+const API_KEY = process.env.API_KEY || "your-api-key-here";
 
 // Cropping control flags
 let croppingMode = {

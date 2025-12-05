@@ -5,6 +5,11 @@ class CardManager:
         self.hole_cards = {}
         self.community_cards = []
 
+    def reset(self):
+        """Reset all cards for new hand"""
+        self.hole_cards = {}
+        self.community_cards = []
+
     def set_hole_cards(self, player, cards):
         self.hole_cards[player] = cards
 

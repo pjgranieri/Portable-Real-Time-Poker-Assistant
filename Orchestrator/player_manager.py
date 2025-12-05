@@ -13,6 +13,16 @@ class PlayerManager:
         self.small_blind = Player.PlayerCoach
         self.big_blind = Player.PlayerOne
 
+    def rotate_blinds(self):
+        """Rotate blinds to next players in sequence"""
+        all_players = list(Player)
+        current_sb_index = self.small_blind.value
+        # Move to next player (wraps around with modulo 4)
+        new_sb_index = (current_sb_index + 1) % 4
+        new_bb_index = (new_sb_index + 1) % 4
+        self.small_blind = all_players[new_sb_index]
+        self.big_blind = all_players[new_bb_index]
+
     def initialize_bankrolls(self):
         """Reset all player states for new game"""
         for p in self.players:

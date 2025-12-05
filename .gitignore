@@ -1,9 +1,16 @@
+# Environment variables
 .env
+.env.local
+
+# Secrets
 secrets.h
+
+# Outputs
 Outputs/
 CameraWebServerEx/
-node_modules/
-Communication/Server/node_modules/
+Image_Recognition/Outputs/*.jpg
+Image_Recognition/Outputs/*.png
+logs/
 *.log
 
 # Python virtual environment
@@ -17,15 +24,18 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+*.egg
+*.egg-info/
 
 # Distribution / packaging
 dist/
 build/
-*.egg-info/
 
-# Environment variables
-.env
-.env.local
+# Node modules
+node_modules/
+Communication/Server/node_modules/
+npm-debug.log
 
 # IDE
 .vscode/
@@ -37,37 +47,13 @@ build/
 .DS_Store
 Thumbs.db
 
-# Node modules
-node_modules/
-npm-debug.log
-
-# Outputs
-Image_Recognition/Outputs/*.jpg
-Image_Recognition/Outputs/*.png
-logs/
-*.log
-
 # Certificates
 certs/*.pem
 
-# Test filesfi
-frame_*.jpg# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
+# Test files
+frame_*.jpg
 
 # Backup files
 *.backup
 *.bak
 *.tmp
-
-# Virtual environment
-.venv/
-venv/
