@@ -76,7 +76,6 @@ An ML-powered poker coaching system that provides real-time strategic recommenda
 ├── src/tests/                 # pytest suites & validation datasets
 └── docs/                      # Final report & technical documentation
 ```
-
 ## Quick Start
 
 ### Hardware Assembly
@@ -107,7 +106,6 @@ An ML-powered poker coaching system that provides real-time strategic recommenda
 ## Future Work
 
 For commercialization:
-- Embed all processing on-device (eliminate cloud dependency)
 - Redesign enclosure for consumer usability
 - Add power button and battery status indicators
 - Reduce overall size for improved portability
@@ -119,5 +117,8 @@ Full technical details available in `ECE_1896_Final_Report.pdf`:
 - Hardware design & testing
 - CV/ML methodology & results
 - Integration strategies
+
+## Live Demo Link:
+https://youtu.be/1nT3llKM1yY
 
 ---
